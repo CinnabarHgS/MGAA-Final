@@ -6,7 +6,7 @@ This repo contains a minimal demo that follows the core scope of the proposal:
 2. a procedural map generator
 3. a simple heuristic AI for automated evaluation
 
-## What is implemented
+## Milestones
 
 - `Milestone 1`: player, enemies, walls, melee combat, win/lose condition
 - `Milestone 2`: random map generation with playability checks
