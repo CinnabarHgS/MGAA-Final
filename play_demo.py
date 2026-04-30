@@ -2,21 +2,21 @@ from __future__ import annotations
 
 import argparse
 
-from grid_battle.game import ATTACK_ACTION, GridBattleEnv, MOVE_ACTION
+from grid_battle.game import GridBattleEnv, PhaseAction, TurnAction
 from grid_battle.pcg import DEFAULT_LEVEL, generate_level
 
 MOVE_KEYS = {
-    "w": (MOVE_ACTION, 1),
-    "d": (MOVE_ACTION, 2),
-    "s": (MOVE_ACTION, 3),
-    "a": (MOVE_ACTION, 4),
+    "w": 1,
+    "d": 2,
+    "s": 3,
+    "a": 4,
 }
 
 ATTACK_KEYS = {
-    "i": (ATTACK_ACTION, 1),
-    "l": (ATTACK_ACTION, 2),
-    "k": (ATTACK_ACTION, 3),
-    "j": (ATTACK_ACTION, 4),
+    "i": 1,
+    "l": 2,
+    "k": 3,
+    "j": 4,
 }
 
 
@@ -48,6 +48,7 @@ def _load_level(args: argparse.Namespace) -> str:
 
 def _describe_turn(before, after, history: list[dict]) -> str:
     notes: list[str] = []
+    player_events = [event for event in history if event["PlayerId"] == 1]
 
     player_health_before = before.player.health if before.player else 0
     player_health_after = after.player.health if after.player else 0
@@ -62,11 +63,33 @@ def _describe_turn(before, after, history: list[dict]) -> str:
         if before_enemy_health and sum(after_enemy_health) < sum(before_enemy_health):
             notes.append("your attack connected")
 
-    player_event = next((event for event in history if event["PlayerId"] == 1), None)
-    if player_event and player_event["DestinationObjectName"] == "enemy" and "your attack connected" not in notes:
+    if any(event["ActionName"] == "wait" for event in player_events):
+        notes.append("you waited")
+
+    if any(
+        event["ActionName"] == "move" and event["DestinationObjectName"] == "enemy"
+        for event in player_events
+    ) and "your attack connected" not in notes:
         notes.append("you bumped into an enemy instead of moving")
 
     return "; ".join(notes) if notes else "no major state change"
+
+
+def _read_phase_input(prompt: str, mapping: dict[str, int], help_text: str) -> int | None | str:
+    while True:
+        try:
+            key = input(prompt).strip().lower()
+        except EOFError:
+            return "quit"
+
+        if key == "q":
+            return "quit"
+        if key == "":
+            return None
+        if key in mapping:
+            return mapping[key]
+
+        print(help_text)
 
 
 def main() -> None:
@@ -77,7 +100,8 @@ def main() -> None:
 
     print("GridBattle demo")
     print("Goal: defeat all enemies before they defeat you.")
-    print("Move with w/a/s/d, attack with i/j/k/l, quit with q.")
+    print("Each turn: choose one move, then one action.")
+    print("Move with w/a/s/d, attack with i/j/k/l, press Enter to skip a phase, quit with q.")
     print()
 
     while True:
@@ -95,22 +119,31 @@ def main() -> None:
             print("You won.")
             break
 
-        try:
-            key = input("> ").strip().lower()
-        except EOFError:
-            print("Input ended. Quit.")
-            break
-        if key == "q":
+        move_direction = _read_phase_input(
+            "move> ",
+            MOVE_KEYS,
+            "Use w/a/s/d to move, Enter to skip movement, or q to quit.",
+        )
+        if move_direction == "quit":
             print("Quit.")
             break
 
-        action = MOVE_KEYS.get(key) or ATTACK_KEYS.get(key)
-        if action is None:
-            print("Unknown input. Use w/a/s/d or i/j/k/l.")
-            continue
+        attack_direction = _read_phase_input(
+            "action> ",
+            ATTACK_KEYS,
+            "Use i/j/k/l to attack, Enter to skip the action, or q to quit.",
+        )
+        if attack_direction == "quit":
+            print("Quit.")
+            break
+
+        turn_action = TurnAction(
+            move_direction=move_direction,
+            action=PhaseAction("attack", attack_direction) if attack_direction is not None else None,
+        )
 
         previous = snapshot
-        snapshot, reward, done, info = env.step(action)
+        snapshot, reward, done, info = env.step(turn_action)
         del reward
         print(_describe_turn(previous, snapshot, info.get("History", [])))
         print()

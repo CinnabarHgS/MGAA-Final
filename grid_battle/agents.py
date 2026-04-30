@@ -2,33 +2,47 @@ from __future__ import annotations
 
 from collections import deque
 
-from .game import ATTACK_ACTION, MOVE_ACTION, BattleSnapshot, delta_to_action_id, positions_around
+from .combat import find_attack_direction, get_unit_profile, positions_that_can_attack_target
+from .game import BattleSnapshot, PhaseAction, TurnAction, delta_to_action_id
 
 
 class HeuristicAgent:
-    def act(self, snapshot: BattleSnapshot) -> tuple[int, int]:
+    def act(self, snapshot: BattleSnapshot) -> TurnAction:
         if snapshot.player is None:
-            return MOVE_ACTION, 1
+            return TurnAction()
         if not snapshot.enemies:
-            return MOVE_ACTION, 1
+            return TurnAction()
 
         player_position = snapshot.player.position
         enemy_positions = {enemy.position for enemy in snapshot.enemies}
+        blocking_positions = set(snapshot.walls)
+        move_direction = None
+        attack_action = None
+        player_profile = get_unit_profile(snapshot, "player", player_position)
 
         for enemy in snapshot.enemies:
-            dx = enemy.position[0] - player_position[0]
-            dy = enemy.position[1] - player_position[1]
-            if abs(dx) + abs(dy) == 1:
-                return ATTACK_ACTION, delta_to_action_id((dx, dy))
+            direction = find_attack_direction(
+                player_position,
+                enemy.position,
+                player_profile.attack_range,
+                blocking_positions=blocking_positions | (enemy_positions - {enemy.position}),
+            )
+            if direction is not None:
+                attack_action = PhaseAction("attack", direction)
+                return TurnAction(move_direction=None, action=attack_action)
 
         blocked = set(snapshot.walls) | enemy_positions
         targets = {
             target
             for enemy in snapshot.enemies
-            for target in positions_around(enemy.position)
-            if 0 <= target[0] < snapshot.width
-            and 0 <= target[1] < snapshot.height
-            and target not in blocked
+            for target in positions_that_can_attack_target(
+                enemy.position,
+                player_profile.attack_range,
+                snapshot.width,
+                snapshot.height,
+                occupied_positions=blocked,
+                blocking_positions=blocking_positions | (enemy_positions - {enemy.position}),
+            )
         }
 
         path = _shortest_path(
@@ -43,17 +57,32 @@ class HeuristicAgent:
             next_position = path[1]
             dx = next_position[0] - player_position[0]
             dy = next_position[1] - player_position[1]
-            return MOVE_ACTION, delta_to_action_id((dx, dy))
+            move_direction = delta_to_action_id((dx, dy))
+            player_position = next_position
 
-        for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
-            candidate = (player_position[0] + dx, player_position[1] + dy)
-            if candidate in blocked:
-                continue
-            if not (0 <= candidate[0] < snapshot.width and 0 <= candidate[1] < snapshot.height):
-                continue
-            return MOVE_ACTION, delta_to_action_id((dx, dy))
+        elif move_direction is None:
+            for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+                candidate = (player_position[0] + dx, player_position[1] + dy)
+                if candidate in blocked:
+                    continue
+                if not (0 <= candidate[0] < snapshot.width and 0 <= candidate[1] < snapshot.height):
+                    continue
+                move_direction = delta_to_action_id((dx, dy))
+                player_position = candidate
+                break
 
-        return MOVE_ACTION, 1
+        for enemy in snapshot.enemies:
+            direction = find_attack_direction(
+                player_position,
+                enemy.position,
+                player_profile.attack_range,
+                blocking_positions=blocking_positions | (enemy_positions - {enemy.position}),
+            )
+            if direction is not None:
+                attack_action = PhaseAction("attack", direction)
+                break
+
+        return TurnAction(move_direction=move_direction, action=attack_action)
 
 
 def _shortest_path(
@@ -95,4 +124,3 @@ def _reconstruct_path(
         path.append(current)
     path.reverse()
     return path
-

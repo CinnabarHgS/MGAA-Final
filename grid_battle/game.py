@@ -6,30 +6,25 @@ import textwrap
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+from .combat import (
+    DEFAULT_COMBAT_RULES,
+    DELTA_TO_DIRECTION,
+    DIRECTION_NAMES,
+    DIRECTION_TO_DELTA,
+)
+
 with contextlib.redirect_stderr(io.StringIO()):
     from griddly import gd
     from griddly.GymWrapper import GymWrapper
 
 MOVE_ACTION = 0
 ATTACK_ACTION = 1
+WAIT_ACTION = 2
 
-PLAYER_STARTING_HEALTH = 4
-ENEMY_STARTING_HEALTH = 2
-
-DIRECTION_TO_DELTA = {
-    1: (0, -1),
-    2: (1, 0),
-    3: (0, 1),
-    4: (-1, 0),
-}
-
-DELTA_TO_DIRECTION = {delta: action_id for action_id, delta in DIRECTION_TO_DELTA.items()}
-
-DIRECTION_NAMES = {
-    1: "up",
-    2: "right",
-    3: "down",
-    4: "left",
+LOW_LEVEL_ACTION_IDS = {
+    "move": MOVE_ACTION,
+    "attack": ATTACK_ACTION,
+    "wait": WAIT_ACTION,
 }
 
 GDY_TEMPLATE = """
@@ -73,6 +68,9 @@ Actions:
         Dst:
           Object: _empty
 
+  # Attack is currently single-tile melee in the Griddly rule layer.
+  # The Python combat helpers centralize all range and damage decisions so
+  # future ranged variants only need one rule update point.
   - Name: attack
     InputMapping:
       Inputs:
@@ -94,12 +92,24 @@ Actions:
         Dst:
           Object: enemy
           Commands:
-            - sub: [health, 1]
+            - sub: [health, __PLAYER_ATTACK_DAMAGE__]
             - lt:
                 Arguments: [health, 1]
                 Commands:
                   - remove: true
                   - reward: 1
+
+  - Name: wait
+    InputMapping:
+      Inputs:
+        1:
+          Description: Wait
+          VectorToDest: [0, 0]
+    Behaviours:
+      - Src:
+          Object: player
+        Dst:
+          Object: player
 
   - Name: enemy_turn
     InputMapping:
@@ -130,7 +140,7 @@ Actions:
         Dst:
           Object: player
           Commands:
-            - sub: [health, 1]
+            - sub: [health, __ENEMY_ATTACK_DAMAGE__]
             - lt:
                 Arguments: [health, 1]
                 Commands:
@@ -164,7 +174,7 @@ Objects:
     MapCharacter: A
     Variables:
       - Name: health
-        InitialValue: 4
+        InitialValue: __PLAYER_MAX_HEALTH__
     Observers:
       Block2D:
         - Shape: square
@@ -175,7 +185,7 @@ Objects:
     MapCharacter: E
     Variables:
       - Name: health
-        InitialValue: 2
+        InitialValue: __ENEMY_MAX_HEALTH__
     InitialActions:
       - Action: enemy_turn
         Delay: 1
@@ -219,6 +229,18 @@ class BattleSnapshot:
         return len(self.enemies)
 
 
+@dataclass(frozen=True)
+class PhaseAction:
+    action_type: str
+    direction: int | None = None
+
+
+@dataclass(frozen=True)
+class TurnAction:
+    move_direction: int | None = None
+    action: PhaseAction | None = None
+
+
 def normalize_level(level: str) -> str:
     cleaned = textwrap.dedent(level).strip()
     rows = [row.strip() for row in cleaned.splitlines() if row.strip()]
@@ -242,7 +264,13 @@ def build_gdy_yaml(levels: Sequence[str]) -> str:
         raise ValueError("At least one level is required.")
 
     levels_block = "\n".join(f"    - |\n{_indent_level(level)}" for level in levels)
-    return GDY_TEMPLATE.replace("__LEVELS__", levels_block)
+    return (
+        GDY_TEMPLATE.replace("__LEVELS__", levels_block)
+        .replace("__PLAYER_MAX_HEALTH__", str(DEFAULT_COMBAT_RULES.player.max_health))
+        .replace("__ENEMY_MAX_HEALTH__", str(DEFAULT_COMBAT_RULES.enemy.max_health))
+        .replace("__PLAYER_ATTACK_DAMAGE__", str(DEFAULT_COMBAT_RULES.player.attack_damage))
+        .replace("__ENEMY_ATTACK_DAMAGE__", str(DEFAULT_COMBAT_RULES.enemy.attack_damage))
+    )
 
 
 def _health_from_object(object_state: dict) -> int:
@@ -308,8 +336,9 @@ class GridBattleEnv:
         self._env.reset()
         return self.snapshot()
 
-    def step(self, action: tuple[int, int]) -> tuple[BattleSnapshot, float, bool, dict]:
-        observation, reward, done, info = self._env.step(list(action))
+    def step(self, turn: TurnAction) -> tuple[BattleSnapshot, float, bool, dict]:
+        low_level_actions = self._encode_turn(turn)
+        observation, reward, done, info = self._env.step(low_level_actions)
         del observation
         self.player_turns += 1
         return self.snapshot(), reward, done, info
@@ -320,9 +349,40 @@ class GridBattleEnv:
     def render_ascii(self) -> str:
         return self._env.render(observer="global", mode="human")
 
+    def _encode_turn(self, turn: TurnAction) -> list[list[int]]:
+        desired_sequence: list[PhaseAction] = []
+
+        if turn.move_direction is not None:
+            desired_sequence.append(PhaseAction(action_type="move", direction=turn.move_direction))
+
+        if turn.action is not None:
+            desired_sequence.append(turn.action)
+
+        if not desired_sequence:
+            desired_sequence.append(PhaseAction(action_type="wait", direction=1))
+
+        # Griddly executes multi-actions in reverse row order, so we reverse the
+        # player's intended sequence before sending it to the engine.
+        return [self._encode_phase_action(phase_action) for phase_action in reversed(desired_sequence)]
+
+    def _encode_phase_action(self, phase_action: PhaseAction) -> list[int]:
+        if phase_action.action_type not in LOW_LEVEL_ACTION_IDS:
+            raise ValueError(f"Unknown action type: {phase_action.action_type}")
+
+        if phase_action.direction is None:
+            if phase_action.action_type == "wait":
+                direction = 1
+            else:
+                raise ValueError(f"{phase_action.action_type} requires a direction.")
+        else:
+            if phase_action.direction not in DIRECTION_TO_DELTA:
+                raise ValueError(f"Invalid direction id: {phase_action.direction}")
+            direction = phase_action.direction
+
+        return [LOW_LEVEL_ACTION_IDS[phase_action.action_type], direction]
+
 
 def positions_around(position: tuple[int, int]) -> Iterable[tuple[int, int]]:
     x, y = position
     for dx, dy in DIRECTION_TO_DELTA.values():
         yield x + dx, y + dy
-

@@ -15,6 +15,7 @@ This repo contains a minimal demo that follows the core scope of the proposal:
 ## File layout
 
 - `grid_battle/game.py`: Griddly environment wrapper and state parsing
+- `grid_battle/combat.py`: shared combat rules and helper functions for range/damage logic
 - `grid_battle/pcg.py`: procedural map generation
 - `grid_battle/agents.py`: heuristic baseline agent
 - `play_demo.py`: command-line playable demo
@@ -37,8 +38,8 @@ py -3.11 -m pip install --target ".venv\Lib\site-packages" -r requirements.txt
 
 Controls:
 
-- `w/a/s/d`: move up/left/down/right
-- `i/j/k/l`: attack up/left/down/right
+- `move>` uses `w/a/s/d` to move, `Enter` to skip movement
+- `action>` uses `i/j/k/l` to attack, `Enter` to skip the action
 - `q`: quit
 
 ## Run AI evaluation
@@ -60,4 +61,3 @@ If we continue from here, the most natural next increment is:
 1. replace the heuristic with MCTS
 2. compare win rate across obstacle densities
 3. add a richer objective such as exit tiles or ranged enemies
-

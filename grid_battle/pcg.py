@@ -5,6 +5,8 @@ import textwrap
 from collections import deque
 from dataclasses import dataclass
 
+from .combat import DEFAULT_COMBAT_RULES, positions_that_can_attack_target
+
 DEFAULT_LEVEL = textwrap.dedent(
     """
     WWWWWWWWW
@@ -74,13 +76,23 @@ def _is_playable(
 ) -> bool:
     blocked = set(enemies)
     reachable = _reachable_tiles(grid, player, blocked)
+    wall_positions = {
+        (x, y)
+        for y, row in enumerate(grid)
+        for x, cell in enumerate(row)
+        if cell == "W"
+    }
+    player_attack_range = DEFAULT_COMBAT_RULES.player.attack_range
 
     for enemy in enemies:
-        attack_positions = [
-            neighbor
-            for neighbor in _neighbors(enemy)
-            if grid[neighbor[1]][neighbor[0]] != "W" and neighbor not in blocked
-        ]
+        attack_positions = positions_that_can_attack_target(
+            enemy,
+            player_attack_range,
+            len(grid[0]),
+            len(grid),
+            occupied_positions=blocked,
+            blocking_positions=wall_positions | (blocked - {enemy}),
+        )
         if not attack_positions:
             return False
         if not any(position in reachable for position in attack_positions):
@@ -162,4 +174,3 @@ def generate_level(
         )
 
     raise RuntimeError("Failed to generate a playable level with the given parameters.")
-
