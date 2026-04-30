@@ -71,6 +71,9 @@ class HeuristicAgent:
                 player_position = candidate
                 break
 
+        if move_direction is not None:
+            player_profile = get_unit_profile(snapshot, "player", player_position)
+
         for enemy in snapshot.enemies:
             direction = find_attack_direction(
                 player_position,
