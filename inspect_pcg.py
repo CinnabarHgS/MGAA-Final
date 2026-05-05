@@ -63,8 +63,8 @@ def main() -> None:
             print(f"type: {args.map_type}")
             print(f"size preset: {size}")
             print(f"seed: {seed}")
-            print(f"baseline random interior obstacles: {generated.obstacle_count}")
-            print(f"baseline requested obstacle density: {generated.obstacle_density:.2%}")
+            print(f"interior wall count reported by generator: {generated.obstacle_count}")
+            print(f"generator obstacle-density setting: {generated.obstacle_density:.2%}")  
             print()
             print(format_analysis(analysis))
 
