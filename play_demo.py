@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import random
 
 from grid_battle.game import GridBattleEnv, PhaseAction, TurnAction
-from grid_battle.pcg import DEFAULT_LEVEL, generate_level
+from grid_battle.pcg import DEFAULT_LEVEL, MAP_SIZES, MAP_TYPES, generate_preset_level
+
 
 MOVE_KEYS = {
     "w": 1,
@@ -22,13 +24,30 @@ ATTACK_KEYS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Play the GridBattle proposal demo.")
-    parser.add_argument("--random-map", action="store_true", help="Generate a fresh map instead of using the fixed demo map.")
-    parser.add_argument("--seed", type=int, default=7, help="Seed for random map generation.")
-    parser.add_argument("--width", type=int, default=9, help="Map width for random generation.")
-    parser.add_argument("--height", type=int, default=7, help="Map height for random generation.")
-    parser.add_argument("--enemies", type=int, default=2, help="Enemy count for random generation.")
-    parser.add_argument("--obstacle-density", type=float, default=0.18, help="Wall density for random generation.")
-    parser.add_argument("--max-steps", type=int, default=40, help="Maximum player turns before the episode stops.")
+    parser.add_argument(
+        "--random-map",
+        action="store_true",
+        help="Generate a fresh map instead of using the fixed demo map.",
+    )
+    parser.add_argument("--seed", type=int, default=random.randint(0,9999), help="Seed for random map generation.")
+    parser.add_argument(
+        "--size",
+        choices=list(MAP_SIZES.keys()),
+        default="small",
+        help="Generated map size preset.",
+    )
+    parser.add_argument(
+        "--map-type",
+        choices=list(MAP_TYPES),
+        default="baseline",
+        help="PCG generator type.",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=100,
+        help="Maximum player turns before the episode stops.",
+    )
     return parser.parse_args()
 
 
@@ -36,11 +55,9 @@ def _load_level(args: argparse.Namespace) -> str:
     if not args.random_map:
         return DEFAULT_LEVEL
 
-    generated = generate_level(
-        width=args.width,
-        height=args.height,
-        enemy_count=args.enemies,
-        obstacle_density=args.obstacle_density,
+    generated = generate_preset_level(
+        size=args.size,
+        map_type=args.map_type,
         seed=args.seed,
     )
     return generated.layout
@@ -52,6 +69,7 @@ def _describe_turn(before, after, history: list[dict]) -> str:
 
     player_health_before = before.player.health if before.player else 0
     player_health_after = after.player.health if after.player else 0
+
     if player_health_after < player_health_before:
         notes.append(f"enemy hit you for {player_health_before - player_health_after}")
 
@@ -66,10 +84,14 @@ def _describe_turn(before, after, history: list[dict]) -> str:
     if any(event["ActionName"] == "wait" for event in player_events):
         notes.append("you waited")
 
-    if any(
-        event["ActionName"] == "move" and event["DestinationObjectName"] == "enemy"
-        for event in player_events
-    ) and "your attack connected" not in notes:
+    if (
+        any(
+            event["ActionName"] == "move"
+            and event["DestinationObjectName"] == "enemy"
+            for event in player_events
+        )
+        and "your attack connected" not in notes
+    ):
         notes.append("you bumped into an enemy instead of moving")
 
     return "; ".join(notes) if notes else "no major state change"
@@ -95,6 +117,7 @@ def _read_phase_input(prompt: str, mapping: dict[str, int], help_text: str) -> i
 def main() -> None:
     args = parse_args()
     level = _load_level(args)
+
     env = GridBattleEnv(level, max_steps=args.max_steps)
     snapshot = env.reset()
 
@@ -102,10 +125,15 @@ def main() -> None:
     print("Goal: defeat all enemies before they defeat you.")
     print("Each turn: choose one move, then one action.")
     print("Move with w/a/s/d, attack with i/j/k/l, press Enter to skip a phase, quit with q.")
+
+    if args.random_map:
+        print(f"Generated map: type={args.map_type}, size={args.size}, seed={args.seed}")
+
     print()
 
     while True:
         print(env.render_ascii())
+
         player_health = snapshot.player.health if snapshot.player else 0
         print(
             f"Turn {snapshot.player_turns}/{args.max_steps} | "
@@ -139,12 +167,15 @@ def main() -> None:
 
         turn_action = TurnAction(
             move_direction=move_direction,
-            action=PhaseAction("attack", attack_direction) if attack_direction is not None else None,
+            action=PhaseAction("attack", attack_direction)
+            if attack_direction is not None
+            else None,
         )
 
         previous = snapshot
         snapshot, reward, done, info = env.step(turn_action)
         del reward
+
         print(_describe_turn(previous, snapshot, info.get("History", [])))
         print()
 
