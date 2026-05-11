@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from .combat import find_attack_direction, get_unit_profile, positions_that_can_attack_target
+from .combat import ITEM_DURATIONS, find_attack_action, get_unit_profile, positions_that_can_attack_target
 from .game import BattleSnapshot, PhaseAction, TurnAction, delta_to_action_id
 
 
@@ -13,6 +13,8 @@ class HeuristicAgent:
         if not snapshot.enemies:
             return TurnAction()
 
+        activate_item = _choose_item_to_activate(snapshot)
+
         player_position = snapshot.player.position
         enemy_positions = {enemy.position for enemy in snapshot.enemies}
         blocking_positions = set(snapshot.walls)
@@ -21,15 +23,16 @@ class HeuristicAgent:
         player_profile = get_unit_profile(snapshot, "player", player_position)
 
         for enemy in snapshot.enemies:
-            direction = find_attack_direction(
+            result = find_attack_action(
                 player_position,
                 enemy.position,
                 player_profile.attack_range,
                 blocking_positions=blocking_positions | (enemy_positions - {enemy.position}),
             )
-            if direction is not None:
-                attack_action = PhaseAction("attack", direction)
-                return TurnAction(move_direction=None, action=attack_action)
+            if result is not None:
+                attack_action = PhaseAction(result[0], result[1])
+                action2 = _find_second_attack(snapshot, player_position, enemy.position, blocking_positions, enemy_positions, player_profile)
+                return TurnAction(move_direction=None, action=attack_action, action2=action2, activate_item=activate_item)
 
         blocked = set(snapshot.walls) | enemy_positions
         targets = {
@@ -75,17 +78,56 @@ class HeuristicAgent:
             player_profile = get_unit_profile(snapshot, "player", player_position)
 
         for enemy in snapshot.enemies:
-            direction = find_attack_direction(
+            result = find_attack_action(
                 player_position,
                 enemy.position,
                 player_profile.attack_range,
                 blocking_positions=blocking_positions | (enemy_positions - {enemy.position}),
             )
-            if direction is not None:
-                attack_action = PhaseAction("attack", direction)
+            if result is not None:
+                attack_action = PhaseAction(result[0], result[1])
                 break
 
-        return TurnAction(move_direction=move_direction, action=attack_action)
+        action2 = None
+        if attack_action is not None:
+            action2 = _find_second_attack(snapshot, player_position, None, blocking_positions, enemy_positions, player_profile)
+
+        return TurnAction(move_direction=move_direction, action=attack_action, action2=action2, activate_item=activate_item)
+
+
+def _choose_item_to_activate(snapshot: BattleSnapshot) -> str | None:
+    active_names = {e.name for e in snapshot.active_effects}
+    for item in snapshot.inventory:
+        if item not in active_names and item in ITEM_DURATIONS:
+            return item
+        if item not in active_names:
+            return item
+    return None
+
+
+def _find_second_attack(
+    snapshot: BattleSnapshot,
+    attacker_pos: tuple[int, int],
+    skip_position: tuple[int, int] | None,
+    blocking_positions: set[tuple[int, int]],
+    enemy_positions: set[tuple[int, int]],
+    player_profile,
+) -> PhaseAction | None:
+    active_names = {e.name for e in snapshot.active_effects}
+    if "dual_berettas" not in active_names:
+        return None
+    for enemy in snapshot.enemies:
+        if enemy.position == skip_position:
+            continue
+        result = find_attack_action(
+            attacker_pos,
+            enemy.position,
+            player_profile.attack_range,
+            blocking_positions=blocking_positions | (enemy_positions - {enemy.position}),
+        )
+        if result is not None:
+            return PhaseAction(result[0], result[1])
+    return None
 
 
 def _shortest_path(
