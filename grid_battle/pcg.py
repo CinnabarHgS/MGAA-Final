@@ -272,6 +272,7 @@ def _finalize_generated_candidate(
         return None
 
     actor_grid = _stamp_actors(grid, player, enemies)
+    _place_terrain_and_items(actor_grid, rng)
 
     return GeneratedLevel(
         layout=_grid_to_string(actor_grid),
@@ -282,6 +283,35 @@ def _finalize_generated_candidate(
         obstacle_density=obstacle_density,
         seed=seed,
     )
+
+
+
+def _place_terrain_and_items(grid: list[list[str]], rng: random.Random) -> None:
+    """Scatter terrain tiles and items onto free floor cells in-place."""
+    height = len(grid)
+    width = len(grid[0]) if height else 0
+    free = [
+        (x, y)
+        for y in range(1, height - 1)
+        for x in range(1, width - 1)
+        if grid[y][x] == "."
+    ]
+    rng.shuffle(free)
+
+    terrain_pool = list("HHBBK")
+    for i, (tx, ty) in enumerate(free[: len(terrain_pool)]):
+        grid[ty][tx] = terrain_pool[i]
+
+    item_pool = ["D", "V", "S"]
+    offset = len(terrain_pool)
+    for i, (ix, iy) in enumerate(free[offset : offset + len(item_pool)]):
+        grid[iy][ix] = item_pool[i]
+
+    if rng.random() < 1 / (width * height):
+        remaining = [pos for pos in free[offset + len(item_pool) :]]
+        if remaining:
+            gx, gy = rng.choice(remaining)
+            grid[gy][gx] = "G"
 
 
 def _grid_to_string(grid: list[list[str]]) -> str:
@@ -676,22 +706,7 @@ def generate_level(
         for ex, ey in enemies:
             grid[ey][ex] = "E"
 
-        free = [(x, y) for x, y in interior if grid[y][x] == "."]
-        rng.shuffle(free)
-
-        terrain_pool = list("HHB BK".replace(" ", ""))
-        for i, (tx, ty) in enumerate(free[: len(terrain_pool)]):
-            grid[ty][tx] = terrain_pool[i]
-
-        item_pool = ["D", "V", "S"]
-        for i, (ix, iy) in enumerate(free[len(terrain_pool) : len(terrain_pool) + len(item_pool)]):
-            grid[iy][ix] = item_pool[i]
-
-        if rng.random() < 1 / (width * height):
-            remaining = [(x, y) for x, y in interior if grid[y][x] == "."]
-            if remaining:
-                gx, gy = rng.choice(remaining)
-                grid[gy][gx] = "G"
+        _place_terrain_and_items(grid, rng)
 
         return GeneratedLevel(
             layout=_grid_to_string(grid),
