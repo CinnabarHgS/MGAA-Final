@@ -3,9 +3,35 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from statistics import mean
+from typing import Protocol
 
-from grid_battle import GridBattleEnv, HeuristicAgent, generate_preset_level
+from grid_battle import (
+    BattleSnapshot,
+    GridBattleEnv,
+    HeuristicAgent,
+    MctsAgent,
+    RandomAgent,
+    TurnAction,
+    generate_preset_level,
+)
 from grid_battle.pcg import MAP_SIZES, MAP_TYPES
+
+
+class Agent(Protocol):
+    def act(self, snapshot: "BattleSnapshot") -> "TurnAction": ...
+
+
+AGENT_CHOICES = ("heuristic", "random", "mcts")
+
+
+def build_agent(name: str, *, mcts_iterations: int, seed: int) -> Agent:
+    if name == "heuristic":
+        return HeuristicAgent()
+    if name == "random":
+        return RandomAgent(seed=seed)
+    if name == "mcts":
+        return MctsAgent(iterations=mcts_iterations, seed=seed)
+    raise ValueError(f"Unknown agent: {name}")
 
 
 @dataclass(frozen=True)
@@ -38,10 +64,22 @@ def parse_args() -> argparse.Namespace:
         default=40,
         help="Maximum player turns per episode.",
     )
+    parser.add_argument(
+        "--agent",
+        choices=AGENT_CHOICES,
+        default="heuristic",
+        help="Which agent to evaluate.",
+    )
+    parser.add_argument(
+        "--mcts-iterations",
+        type=int,
+        default=200,
+        help="Number of MCTS iterations per turn (only used when --agent mcts).",
+    )
     return parser.parse_args()
 
 
-def run_episode(env: GridBattleEnv, agent: HeuristicAgent, max_steps: int) -> EpisodeResult:
+def run_episode(env: GridBattleEnv, agent: Agent, max_steps: int) -> EpisodeResult:
     snapshot = env.reset()
     initial_health = snapshot.player.health if snapshot.player else 0
 
@@ -69,7 +107,7 @@ def run_episode(env: GridBattleEnv, agent: HeuristicAgent, max_steps: int) -> Ep
 
 def main() -> None:
     args = parse_args()
-    agent = HeuristicAgent()
+    agent = build_agent(args.agent, mcts_iterations=args.mcts_iterations, seed=args.seed)
     results: list[EpisodeResult] = []
 
     generated_width = 0
@@ -99,7 +137,8 @@ def main() -> None:
         else 0.0
     )
 
-    print("Baseline evaluation summary")
+    print("Evaluation summary")
+    print(f"Agent: {args.agent}")
     print(f"Episodes: {args.episodes}")
     print(f"Map type: {args.map_type}")
     print(f"Map size preset: {args.size}")

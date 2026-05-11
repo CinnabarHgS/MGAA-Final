@@ -5,12 +5,10 @@ import dataclasses
 import io
 import random
 import textwrap
-from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from .combat import (
     DEFAULT_COMBAT_RULES,
-    DELTA_TO_DIRECTION,
     DIRECTION_NAMES,
     DIRECTION_TO_DELTA,
     ITEM_DUAL_BERETTAS,
@@ -24,6 +22,14 @@ from .combat import (
     TERRAIN_HILL,
     TERRAIN_MAP_CHARS,
     ActiveEffect,
+)
+from .state import (
+    BattleSnapshot,
+    PhaseAction,
+    TurnAction,
+    UnitState,
+    action_to_delta,
+    delta_to_action_id,
 )
 
 with contextlib.redirect_stderr(io.StringIO()):
@@ -250,47 +256,6 @@ Objects:
 """.strip()
 
 
-@dataclass(frozen=True)
-class UnitState:
-    position: tuple[int, int]
-    health: int
-
-
-@dataclass(frozen=True)
-class BattleSnapshot:
-    width: int
-    height: int
-    game_ticks: int
-    player_turns: int
-    player: UnitState | None
-    enemies: tuple[UnitState, ...]
-    walls: frozenset[tuple[int, int]]
-    hills: frozenset[tuple[int, int]] = dataclasses.field(default_factory=frozenset)
-    bushes: frozenset[tuple[int, int]] = dataclasses.field(default_factory=frozenset)
-    bunkers: frozenset[tuple[int, int]] = dataclasses.field(default_factory=frozenset)
-    map_items: tuple[tuple[tuple[int, int], str], ...] = ()
-    inventory: tuple[str, ...] = ()
-    active_effects: tuple[ActiveEffect, ...] = ()
-
-    @property
-    def remaining_enemies(self) -> int:
-        return len(self.enemies)
-
-
-@dataclass(frozen=True)
-class PhaseAction:
-    action_type: str
-    direction: int | None = None
-
-
-@dataclass(frozen=True)
-class TurnAction:
-    move_direction: int | None = None
-    action: PhaseAction | None = None
-    action2: PhaseAction | None = None
-    activate_item: str | None = None
-
-
 def normalize_level(level: str) -> str:
     cleaned = textwrap.dedent(level).strip()
     rows = [row.strip() for row in cleaned.splitlines() if row.strip()]
@@ -397,14 +362,6 @@ def snapshot_from_state(state: dict, player_turns: int) -> BattleSnapshot:
         enemies=tuple(enemies),
         walls=frozenset(walls),
     )
-
-
-def action_to_delta(action_id: int) -> tuple[int, int]:
-    return DIRECTION_TO_DELTA[action_id]
-
-
-def delta_to_action_id(delta: tuple[int, int]) -> int:
-    return DELTA_TO_DIRECTION[delta]
 
 
 class GridBattleEnv:

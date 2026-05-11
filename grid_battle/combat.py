@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
-    from .game import BattleSnapshot
+    from .state import BattleSnapshot
 
 
 DIRECTION_TO_DELTA = {

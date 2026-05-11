@@ -1,4 +1,6 @@
-from .agents import HeuristicAgent
+from .agents import HeuristicAgent, RandomAgent, heuristic_turn
+from .mcts import MctsAgent
+from .simulator import simulate_turn
 from .combat import (
     ITEM_DUAL_BERETTAS,
     ITEM_DURATIONS,
@@ -20,15 +22,23 @@ from .combat import (
     get_unit_profile,
     positions_that_can_attack_target,
 )
-from .game import (
-    ATTACK_ACTION,
-    MOVE_ACTION,
-    RANGED_ATTACK_ACTION,
-    WAIT_ACTION,
-    GridBattleEnv,
-    PhaseAction,
-    TurnAction,
-)
+from .state import BattleSnapshot, PhaseAction, TurnAction, UnitState
+
+# griddly only ships an x86_64 wheel on pypi so it breaks on arm64 mac.
+# wrap the import so the rest of the package still works without it
+# (simulator, agents and pcg dont need griddly).
+try:
+    from .game import (
+        ATTACK_ACTION,
+        MOVE_ACTION,
+        RANGED_ATTACK_ACTION,
+        WAIT_ACTION,
+        GridBattleEnv,
+    )
+except ImportError as _griddly_import_error:  # pragma: no cover
+    ATTACK_ACTION = MOVE_ACTION = RANGED_ATTACK_ACTION = WAIT_ACTION = None  # type: ignore[assignment]
+    GridBattleEnv = None  # type: ignore[assignment]
+    _griddly_unavailable_reason = str(_griddly_import_error)
 from .pcg import (
     BASELINE_PRESETS,
     DEFAULT_LEVEL,
@@ -47,6 +57,7 @@ __all__ = [
     "ATTACK_ACTION",
     "ActiveEffect",
     "BASELINE_PRESETS",
+    "BattleSnapshot",
     "CombatRules",
     "DEFAULT_LEVEL",
     "DEFAULT_COMBAT_RULES",
@@ -65,14 +76,17 @@ __all__ = [
     "MAP_TYPES",
     "MOVE_ACTION",
     "MapAnalysis",
+    "MctsAgent",
     "PhaseAction",
     "RANGED_ATTACK_ACTION",
+    "RandomAgent",
     "TERRAIN_BUNKER",
     "TERRAIN_BUSH",
     "TERRAIN_HILL",
     "TERRAIN_MAP_CHARS",
     "TurnAction",
     "UnitCombatProfile",
+    "UnitState",
     "WAIT_ACTION",
     "analyze_level",
     "find_attack_action",
@@ -81,5 +95,7 @@ __all__ = [
     "generate_level",
     "generate_preset_level",
     "get_unit_profile",
+    "heuristic_turn",
     "positions_that_can_attack_target",
+    "simulate_turn",
 ]
