@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
+import random
 import textwrap
 from dataclasses import dataclass
 from typing import Iterable, Sequence
@@ -11,6 +13,17 @@ from .combat import (
     DELTA_TO_DIRECTION,
     DIRECTION_NAMES,
     DIRECTION_TO_DELTA,
+    ITEM_DUAL_BERETTAS,
+    ITEM_DURATIONS,
+    ITEM_GOLDEN_GUN,
+    ITEM_MAP_CHARS,
+    ITEM_SHOTGUN,
+    ITEM_VEHICLE,
+    TERRAIN_BUNKER,
+    TERRAIN_BUSH,
+    TERRAIN_HILL,
+    TERRAIN_MAP_CHARS,
+    ActiveEffect,
 )
 
 with contextlib.redirect_stderr(io.StringIO()):
@@ -20,12 +33,16 @@ with contextlib.redirect_stderr(io.StringIO()):
 MOVE_ACTION = 0
 ATTACK_ACTION = 1
 WAIT_ACTION = 2
+RANGED_ATTACK_ACTION = 3
 
 LOW_LEVEL_ACTION_IDS = {
     "move": MOVE_ACTION,
     "attack": ATTACK_ACTION,
     "wait": WAIT_ACTION,
+    "ranged_attack": RANGED_ATTACK_ACTION,
 }
+
+_GRIDDLY_PLAYER_HP = 9999
 
 GDY_TEMPLATE = """
 Version: "0.1"
@@ -68,9 +85,6 @@ Actions:
         Dst:
           Object: _empty
 
-  # Attack is currently single-tile melee in the Griddly rule layer.
-  # The Python combat helpers centralize all range and damage decisions so
-  # future ranged variants only need one rule update point.
   - Name: attack
     InputMapping:
       Inputs:
@@ -110,6 +124,34 @@ Actions:
           Object: player
         Dst:
           Object: player
+
+  - Name: ranged_attack
+    InputMapping:
+      Inputs:
+        1:
+          Description: Up
+          VectorToDest: [0, -2]
+        2:
+          Description: Right
+          VectorToDest: [2, 0]
+        3:
+          Description: Down
+          VectorToDest: [0, 2]
+        4:
+          Description: Left
+          VectorToDest: [-2, 0]
+    Behaviours:
+      - Src:
+          Object: player
+        Dst:
+          Object: enemy
+          Commands:
+            - sub: [health, __PLAYER_ATTACK_DAMAGE__]
+            - lt:
+                Arguments: [health, 1]
+                Commands:
+                  - remove: true
+                  - reward: 1
 
   - Name: enemy_turn
     InputMapping:
@@ -223,6 +265,12 @@ class BattleSnapshot:
     player: UnitState | None
     enemies: tuple[UnitState, ...]
     walls: frozenset[tuple[int, int]]
+    hills: frozenset[tuple[int, int]] = dataclasses.field(default_factory=frozenset)
+    bushes: frozenset[tuple[int, int]] = dataclasses.field(default_factory=frozenset)
+    bunkers: frozenset[tuple[int, int]] = dataclasses.field(default_factory=frozenset)
+    map_items: tuple[tuple[tuple[int, int], str], ...] = ()
+    inventory: tuple[str, ...] = ()
+    active_effects: tuple[ActiveEffect, ...] = ()
 
     @property
     def remaining_enemies(self) -> int:
@@ -239,6 +287,8 @@ class PhaseAction:
 class TurnAction:
     move_direction: int | None = None
     action: PhaseAction | None = None
+    action2: PhaseAction | None = None
+    activate_item: str | None = None
 
 
 def normalize_level(level: str) -> str:
@@ -259,6 +309,26 @@ def _indent_level(level: str) -> str:
     return "\n".join(f"      {row}" for row in normalized.splitlines())
 
 
+def _strip_special_tiles(
+    level: str,
+) -> tuple[str, dict[str, frozenset[tuple[int, int]]], dict[tuple[int, int], str]]:
+    terrain: dict[str, set[tuple[int, int]]] = {t: set() for t in TERRAIN_MAP_CHARS.values()}
+    items: dict[tuple[int, int], str] = {}
+    rows = normalize_level(level).splitlines()
+    new_rows = []
+    for y, row in enumerate(rows):
+        new_row = list(row)
+        for x, ch in enumerate(row):
+            if ch in TERRAIN_MAP_CHARS:
+                terrain[TERRAIN_MAP_CHARS[ch]].add((x, y))
+                new_row[x] = "."
+            elif ch in ITEM_MAP_CHARS:
+                items[(x, y)] = ITEM_MAP_CHARS[ch]
+                new_row[x] = "."
+        new_rows.append("".join(new_row))
+    return "\n".join(new_rows), {k: frozenset(v) for k, v in terrain.items()}, items
+
+
 def build_gdy_yaml(levels: Sequence[str]) -> str:
     if not levels:
         raise ValueError("At least one level is required.")
@@ -266,7 +336,7 @@ def build_gdy_yaml(levels: Sequence[str]) -> str:
     levels_block = "\n".join(f"    - |\n{_indent_level(level)}" for level in levels)
     return (
         GDY_TEMPLATE.replace("__LEVELS__", levels_block)
-        .replace("__PLAYER_MAX_HEALTH__", str(DEFAULT_COMBAT_RULES.player.max_health))
+        .replace("__PLAYER_MAX_HEALTH__", str(_GRIDDLY_PLAYER_HP))
         .replace("__ENEMY_MAX_HEALTH__", str(DEFAULT_COMBAT_RULES.enemy.max_health))
         .replace("__PLAYER_ATTACK_DAMAGE__", str(DEFAULT_COMBAT_RULES.player.attack_damage))
         .replace("__ENEMY_ATTACK_DAMAGE__", str(DEFAULT_COMBAT_RULES.enemy.attack_damage))
@@ -277,13 +347,29 @@ def _health_from_object(object_state: dict) -> int:
     return int(object_state.get("Variables", {}).get("health", 0))
 
 
+def _griddly_player_health_from_state(state: dict) -> int | None:
+    for obj in state["Objects"]:
+        if obj["Name"] == "player":
+            return _health_from_object(obj)
+    return None
+
+
+def _player_position_from_state(state: dict) -> tuple[int, int] | None:
+    for obj in state["Objects"]:
+        if obj["Name"] == "player":
+            return tuple(obj["Location"])
+    return None
+
+
 def snapshot_from_state(state: dict, player_turns: int) -> BattleSnapshot:
     player = None
     enemies: list[UnitState] = []
     walls: set[tuple[int, int]] = set()
+    all_locations: list[tuple[int, int]] = []
 
     for obj in state["Objects"]:
         position = tuple(obj["Location"])
+        all_locations.append(position)
         name = obj["Name"]
 
         if name == "player":
@@ -295,9 +381,16 @@ def snapshot_from_state(state: dict, player_turns: int) -> BattleSnapshot:
 
     enemies.sort(key=lambda unit: unit.position)
 
+    if "Grid" in state:
+        grid_width = state["Grid"]["Width"]
+        grid_height = state["Grid"]["Height"]
+    else:
+        grid_width = (max(loc[0] for loc in all_locations) + 1) if all_locations else 0
+        grid_height = (max(loc[1] for loc in all_locations) + 1) if all_locations else 0
+
     return BattleSnapshot(
-        width=state["Grid"]["Width"],
-        height=state["Grid"]["Height"],
+        width=grid_width,
+        height=grid_height,
         game_ticks=state["GameTicks"],
         player_turns=player_turns,
         player=player,
@@ -316,7 +409,18 @@ def delta_to_action_id(delta: tuple[int, int]) -> int:
 
 class GridBattleEnv:
     def __init__(self, level: str, max_steps: int = 40):
-        self._level = normalize_level(level)
+        cleaned_level, terrain, map_items = _strip_special_tiles(level)
+        self._hills: frozenset[tuple[int, int]] = terrain[TERRAIN_HILL]
+        self._bushes: frozenset[tuple[int, int]] = terrain[TERRAIN_BUSH]
+        self._bunkers: frozenset[tuple[int, int]] = terrain[TERRAIN_BUNKER]
+        self._original_map_items: dict[tuple[int, int], str] = dict(map_items)
+        self._map_items: dict[tuple[int, int], str] = dict(map_items)
+        self._player_hp: int = DEFAULT_COMBAT_RULES.player.max_health
+        self._prev_griddly_player_hp: int = _GRIDDLY_PLAYER_HP
+        self._player_pos: tuple[int, int] | None = None
+        self._inventory: list[str] = []
+        self._active_effects: list[ActiveEffect] = []
+        self._level = normalize_level(cleaned_level)
         self._yaml = build_gdy_yaml([self._level])
         self._env = GymWrapper(
             yaml_string=self._yaml,
@@ -333,37 +437,112 @@ class GridBattleEnv:
 
     def reset(self) -> BattleSnapshot:
         self.player_turns = 0
+        self._player_hp = DEFAULT_COMBAT_RULES.player.max_health
+        self._prev_griddly_player_hp = _GRIDDLY_PLAYER_HP
+        self._player_pos = None
+        self._map_items = dict(self._original_map_items)
+        self._inventory = []
+        self._active_effects = []
         self._env.reset()
+        state = self._env.get_state()
+        self._player_pos = _player_position_from_state(state)
         return self.snapshot()
 
     def step(self, turn: TurnAction) -> tuple[BattleSnapshot, float, bool, dict]:
+        if turn.activate_item is not None and turn.activate_item in self._inventory:
+            self._inventory.remove(turn.activate_item)
+            duration = 1 if turn.activate_item == ITEM_GOLDEN_GUN else ITEM_DURATIONS.get(turn.activate_item, 1)
+            self._active_effects.append(ActiveEffect(turn.activate_item, duration))
+
+        on_bunker = self._player_pos is not None and self._player_pos in self._bunkers
+        if on_bunker:
+            turn = TurnAction(
+                move_direction=None,
+                action=turn.action,
+                action2=turn.action2,
+                activate_item=None,
+            )
+
         low_level_actions = self._encode_turn(turn)
         observation, reward, done, info = self._env.step(low_level_actions)
         del observation
         self.player_turns += 1
+
+        griddly_state = self._env.get_state()
+        griddly_hp = _griddly_player_health_from_state(griddly_state)
+        if griddly_hp is not None:
+            raw_damage = self._prev_griddly_player_hp - griddly_hp
+            if raw_damage > 0:
+                new_pos = _player_position_from_state(griddly_state)
+                if new_pos in self._bushes and random.random() < 0.5:
+                    raw_damage = 0
+                if on_bunker:
+                    raw_damage = 0
+                self._player_hp = max(0, self._player_hp - raw_damage)
+            self._prev_griddly_player_hp = griddly_hp
+
+        new_pos = _player_position_from_state(griddly_state)
+        if new_pos is not None and new_pos in self._map_items:
+            self._inventory.append(self._map_items.pop(new_pos))
+
+        self._player_pos = new_pos
+
+        self._active_effects = [
+            ActiveEffect(e.name, e.turns_left - 1)
+            for e in self._active_effects
+            if e.turns_left > 1
+        ]
+
+        done = done or self._player_hp <= 0
         return self.snapshot(), reward, done, info
 
     def snapshot(self) -> BattleSnapshot:
-        return snapshot_from_state(self._env.get_state(), self.player_turns)
+        raw = snapshot_from_state(self._env.get_state(), self.player_turns)
+        player = (
+            UnitState(raw.player.position, self._player_hp)
+            if raw.player is not None and self._player_hp > 0
+            else None
+        )
+        return dataclasses.replace(
+            raw,
+            player=player,
+            hills=self._hills,
+            bushes=self._bushes,
+            bunkers=self._bunkers,
+            map_items=tuple(sorted(self._map_items.items())),
+            inventory=tuple(self._inventory),
+            active_effects=tuple(self._active_effects),
+        )
 
     def render_ascii(self) -> str:
         return self._env.render(observer="global", mode="human")
 
     def _encode_turn(self, turn: TurnAction) -> list[list[int]]:
+        active_names = {e.name for e in self._active_effects}
         desired_sequence: list[PhaseAction] = []
 
         if turn.move_direction is not None:
             desired_sequence.append(PhaseAction(action_type="move", direction=turn.move_direction))
+            if ITEM_VEHICLE in active_names:
+                desired_sequence.append(PhaseAction(action_type="move", direction=turn.move_direction))
 
         if turn.action is not None:
-            desired_sequence.append(turn.action)
+            if ITEM_GOLDEN_GUN in active_names:
+                for _ in range(DEFAULT_COMBAT_RULES.enemy.max_health + 1):
+                    desired_sequence.append(turn.action)
+            elif ITEM_SHOTGUN in active_names and turn.action.action_type == "attack":
+                desired_sequence.append(turn.action)
+                desired_sequence.append(turn.action)
+            else:
+                desired_sequence.append(turn.action)
+
+        if ITEM_DUAL_BERETTAS in active_names and turn.action2 is not None:
+            desired_sequence.append(turn.action2)
 
         if not desired_sequence:
             desired_sequence.append(PhaseAction(action_type="wait", direction=1))
 
-        # Griddly executes multi-actions in reverse row order, so we reverse the
-        # player's intended sequence before sending it to the engine.
-        return [self._encode_phase_action(phase_action) for phase_action in reversed(desired_sequence)]
+        return [self._encode_phase_action(pa) for pa in reversed(desired_sequence)]
 
     def _encode_phase_action(self, phase_action: PhaseAction) -> list[int]:
         if phase_action.action_type not in LOW_LEVEL_ACTION_IDS:

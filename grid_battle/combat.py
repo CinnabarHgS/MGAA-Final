@@ -42,6 +42,36 @@ DEFAULT_COMBAT_RULES = CombatRules(
     enemy=UnitCombatProfile(max_health=2, attack_damage=1, attack_range=1),
 )
 
+TERRAIN_HILL = "hill"
+TERRAIN_BUSH = "bush"
+TERRAIN_BUNKER = "bunker"
+
+TERRAIN_MAP_CHARS: dict[str, str] = {"H": TERRAIN_HILL, "B": TERRAIN_BUSH, "K": TERRAIN_BUNKER}
+
+ITEM_GOLDEN_GUN = "golden_gun"
+ITEM_DUAL_BERETTAS = "dual_berettas"
+ITEM_VEHICLE = "vehicle"
+ITEM_SHOTGUN = "shotgun"
+
+ITEM_MAP_CHARS: dict[str, str] = {
+    "G": ITEM_GOLDEN_GUN,
+    "D": ITEM_DUAL_BERETTAS,
+    "V": ITEM_VEHICLE,
+    "S": ITEM_SHOTGUN,
+}
+
+ITEM_DURATIONS: dict[str, int] = {
+    ITEM_DUAL_BERETTAS: 5,
+    ITEM_VEHICLE: 3,
+    ITEM_SHOTGUN: 5,
+}
+
+
+@dataclass(frozen=True)
+class ActiveEffect:
+    name: str
+    turns_left: int
+
 
 def get_unit_profile(
     snapshot: BattleSnapshot | None,
@@ -89,8 +119,13 @@ def _attack_range_bonus(
     unit_name: str,
     position: tuple[int, int],
 ) -> int:
-    del snapshot, unit_name, position
-    return 0
+    bonus = 0
+    if snapshot is not None and position is not None:
+        if position in snapshot.hills:
+            bonus += 1
+        if unit_name == "player" and any(e.name == ITEM_SHOTGUN for e in snapshot.active_effects):
+            bonus += 1
+    return bonus
 
 
 def cardinal_relation(
@@ -174,6 +209,22 @@ def iter_attack_tiles(
             tile = (origin[0] + dx * distance, origin[1] + dy * distance)
             if 0 <= tile[0] < width and 0 <= tile[1] < height:
                 yield direction, distance, tile
+
+
+def find_attack_action(
+    attacker_position: tuple[int, int],
+    target_position: tuple[int, int],
+    attack_range: int,
+    blocking_positions: set[tuple[int, int]] | frozenset[tuple[int, int]] | None = None,
+) -> tuple[str, int] | None:
+    direction = find_attack_direction(attacker_position, target_position, attack_range, blocking_positions)
+    if direction is None:
+        return None
+    rel = cardinal_relation(attacker_position, target_position)
+    if rel is None:
+        return None
+    _, distance = rel
+    return ("attack" if distance <= 1 else "ranged_attack", direction)
 
 
 def positions_that_can_attack_target(

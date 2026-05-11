@@ -6,7 +6,20 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Literal
 
-from .combat import DEFAULT_COMBAT_RULES, positions_that_can_attack_target
+from .combat import DEFAULT_COMBAT_RULES, ITEM_MAP_CHARS, TERRAIN_MAP_CHARS, positions_that_can_attack_target
+
+# DEFAULT_LEVEL = textwrap.dedent(
+#     """
+#     WWWWWWWWW
+#     W..E....W
+#     W.W.WW..W
+#     W.H.A..SW
+#     W..WW.W.W
+#     W.B..E..W
+#     WWWWWWWWW
+#     """
+# ).strip()
+
 
 
 MapSize = Literal["tiny", "small", "medium", "large", "giant"]
@@ -69,15 +82,21 @@ ARENA_PRESETS: dict[MapSize, ArenaPreset] = {
 
 DEFAULT_LEVEL = textwrap.dedent(
     """
-    WWWWWWWWW
-    W..E....W
-    W.W.WW..W
-    W...A...W
-    W..WW.W.W
-    W....E..W
-    WWWWWWWWW
-    """
+    WWWWWWWWWWWWW
+    W...H..E....W
+    W.W.WW..B...W
+    W..KA..E....W
+    W..WW.W.H...W
+    W.S..E...D..W
+    W....G...V..W
+    WWWWWWWWWWWWW
+"""
 ).strip()
+
+
+_TERRAIN_CHARS = set(TERRAIN_MAP_CHARS)
+_ITEM_CHARS = set(ITEM_MAP_CHARS)
+_SPECIAL_CHARS = _TERRAIN_CHARS | _ITEM_CHARS
 
 
 @dataclass(frozen=True)
@@ -656,6 +675,23 @@ def generate_level(
 
         for ex, ey in enemies:
             grid[ey][ex] = "E"
+
+        free = [(x, y) for x, y in interior if grid[y][x] == "."]
+        rng.shuffle(free)
+
+        terrain_pool = list("HHB BK".replace(" ", ""))
+        for i, (tx, ty) in enumerate(free[: len(terrain_pool)]):
+            grid[ty][tx] = terrain_pool[i]
+
+        item_pool = ["D", "V", "S"]
+        for i, (ix, iy) in enumerate(free[len(terrain_pool) : len(terrain_pool) + len(item_pool)]):
+            grid[iy][ix] = item_pool[i]
+
+        if rng.random() < 1 / (width * height):
+            remaining = [(x, y) for x, y in interior if grid[y][x] == "."]
+            if remaining:
+                gx, gy = rng.choice(remaining)
+                grid[gy][gx] = "G"
 
         return GeneratedLevel(
             layout=_grid_to_string(grid),
