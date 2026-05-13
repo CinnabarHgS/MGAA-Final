@@ -254,6 +254,7 @@ def _finalize_generated_candidate(
     seed: int | None,
     preferred_player: tuple[int, int] | None = None,
     prefer_far_enemies: bool = True,
+    item_level: str = "default",
 ) -> GeneratedLevel | None:
     placement = _place_actors_on_floor(
         grid=grid,
@@ -272,7 +273,7 @@ def _finalize_generated_candidate(
         return None
 
     actor_grid = _stamp_actors(grid, player, enemies)
-    _place_terrain_and_items(actor_grid, rng)
+    _place_terrain_and_items(actor_grid, rng, item_level=item_level)
 
     return GeneratedLevel(
         layout=_grid_to_string(actor_grid),
@@ -286,7 +287,25 @@ def _finalize_generated_candidate(
 
 
 
-def _place_terrain_and_items(grid: list[list[str]], rng: random.Random) -> None:
+ITEM_LEVELS = ("none", "default", "double")
+
+
+def _pools_for_item_level(item_level: str) -> tuple[list[str], list[str], bool]:
+    """Return (terrain_pool, item_pool, allow_golden_gun) for a given level name."""
+    if item_level == "none":
+        return [], [], False
+    if item_level == "default":
+        return list("HHBBK"), ["D", "V", "S"], True
+    if item_level == "double":
+        return list("HHHHBBBBKK"), ["D", "D", "V", "V", "S", "S"], True
+    raise ValueError(f"Unknown item_level: {item_level!r}. Choose from {ITEM_LEVELS}.")
+
+
+def _place_terrain_and_items(
+    grid: list[list[str]],
+    rng: random.Random,
+    item_level: str = "default",
+) -> None:
     """Scatter terrain tiles and items onto free floor cells in-place."""
     height = len(grid)
     width = len(grid[0]) if height else 0
@@ -298,16 +317,16 @@ def _place_terrain_and_items(grid: list[list[str]], rng: random.Random) -> None:
     ]
     rng.shuffle(free)
 
-    terrain_pool = list("HHBBK")
+    terrain_pool, item_pool, allow_golden_gun = _pools_for_item_level(item_level)
+
     for i, (tx, ty) in enumerate(free[: len(terrain_pool)]):
         grid[ty][tx] = terrain_pool[i]
 
-    item_pool = ["D", "V", "S"]
     offset = len(terrain_pool)
     for i, (ix, iy) in enumerate(free[offset : offset + len(item_pool)]):
         grid[iy][ix] = item_pool[i]
 
-    if rng.random() < 1 / (width * height):
+    if allow_golden_gun and rng.random() < 1 / (width * height):
         remaining = [pos for pos in free[offset + len(item_pool) :]]
         if remaining:
             gx, gy = rng.choice(remaining)
@@ -646,6 +665,7 @@ def generate_level(
     obstacle_density: float = 0.18,
     seed: int | None = None,
     max_attempts: int = 200,
+    item_level: str = "default",
 ) -> GeneratedLevel:
     if width < 7 or height < 7:
         raise ValueError("Use at least a 7x7 grid so the map has enough room.")
@@ -706,7 +726,7 @@ def generate_level(
         for ex, ey in enemies:
             grid[ey][ex] = "E"
 
-        _place_terrain_and_items(grid, rng)
+        _place_terrain_and_items(grid, rng, item_level=item_level)
 
         return GeneratedLevel(
             layout=_grid_to_string(grid),
@@ -729,6 +749,7 @@ def generate_random_walk_level(
     branch_chance: float = 0.15,
     seed: int | None = None,
     max_attempts: int = 200,
+    item_level: str = "default",
 ) -> GeneratedLevel:
     """Generate a cave-like tunnel system with occasional open chambers.
 
@@ -1061,6 +1082,7 @@ def generate_random_walk_level(
             seed=seed,
             preferred_player=None,
             prefer_far_enemies=True,
+            item_level=item_level,
         )
 
         if result is not None:
@@ -1091,6 +1113,7 @@ def generate_arena_level(
     obstacle_density: float = 0.10,
     seed: int | None = None,
     max_attempts: int = 200,
+    item_level: str = "default",
 ) -> GeneratedLevel:
     """Generate an open combat arena with sparse mirrored pillar obstacles."""
 
@@ -1150,6 +1173,7 @@ def generate_arena_level(
             seed=seed,
             preferred_player=player_position,
             prefer_far_enemies=True,
+            item_level=item_level,
         )
 
         if result is not None:
@@ -1158,11 +1182,41 @@ def generate_arena_level(
     raise RuntimeError("Failed to generate a playable arena level.")
 
 
+WALL_DENSITY_LEVELS = ("low", "default", "high")
+_WALL_DENSITY_MULTIPLIER = {"low": 0.5, "default": 1.0, "high": 1.5}
+
+ENEMY_COUNT_LEVELS = ("low", "default", "high")
+_ENEMY_COUNT_DELTA = {"low": -1, "default": 0, "high": +2}
+
+
+def _resolve_enemy_count(preset_count: int, enemy_count: "int | str | None") -> int:
+    if enemy_count is None or enemy_count == "default":
+        return preset_count
+    if isinstance(enemy_count, str):
+        if enemy_count not in _ENEMY_COUNT_DELTA:
+            raise ValueError(
+                f"enemy_count must be int, None, or one of {ENEMY_COUNT_LEVELS}, got {enemy_count!r}"
+            )
+        return max(1, preset_count + _ENEMY_COUNT_DELTA[enemy_count])
+    return max(1, int(enemy_count))
+
+
+def _resolve_wall_multiplier(wall_density: str) -> float:
+    if wall_density not in _WALL_DENSITY_MULTIPLIER:
+        raise ValueError(
+            f"wall_density must be one of {WALL_DENSITY_LEVELS}, got {wall_density!r}"
+        )
+    return _WALL_DENSITY_MULTIPLIER[wall_density]
+
+
 def generate_preset_level(
     size: MapSize = "small",
     map_type: MapType = "baseline",
     seed: int | None = None,
     max_attempts: int = 200,
+    item_level: str = "default",
+    enemy_count: "int | str | None" = None,
+    wall_density: str = "default",
 ) -> GeneratedLevel:
     """Generate a map using a named size and generator type."""
 
@@ -1172,42 +1226,52 @@ def generate_preset_level(
         raise ValueError(f"Unknown map type: {map_type}")
 
     width, height = MAP_SIZES[size]
+    wall_mult = _resolve_wall_multiplier(wall_density)
 
     if map_type == "baseline":
         preset = BASELINE_PRESETS[size]
+        scaled_density = min(0.35, max(0.0, preset.obstacle_density * wall_mult))
 
         return generate_level(
             width=width,
             height=height,
-            enemy_count=preset.enemy_count,
-            obstacle_density=preset.obstacle_density,
+            enemy_count=_resolve_enemy_count(preset.enemy_count, enemy_count),
+            obstacle_density=scaled_density,
             seed=seed,
             max_attempts=max_attempts,
+            item_level=item_level,
         )
 
     if map_type == "random_walk":
         preset = RANDOM_WALK_PRESETS[size]
+        # floor_fraction is inversely related to wall density: more walls = lower floor.
+        # Apply the multiplier to (1 - floor_fraction), then invert back.
+        wall_share = (1.0 - preset.floor_fraction) * wall_mult
+        scaled_floor = min(0.70, max(0.20, 1.0 - wall_share))
 
         return generate_random_walk_level(
             width=width,
             height=height,
-            enemy_count=preset.enemy_count,
-            floor_fraction=preset.floor_fraction,
+            enemy_count=_resolve_enemy_count(preset.enemy_count, enemy_count),
+            floor_fraction=scaled_floor,
             branch_chance=preset.branch_chance,
             seed=seed,
             max_attempts=max_attempts,
+            item_level=item_level,
         )
 
     if map_type == "arena":
         preset = ARENA_PRESETS[size]
+        scaled_density = min(0.25, max(0.0, preset.obstacle_density * wall_mult))
 
         return generate_arena_level(
             width=width,
             height=height,
-            enemy_count=preset.enemy_count,
-            obstacle_density=preset.obstacle_density,
+            enemy_count=_resolve_enemy_count(preset.enemy_count, enemy_count),
+            obstacle_density=scaled_density,
             seed=seed,
             max_attempts=max_attempts,
+            item_level=item_level,
         )
 
     raise ValueError(f"Unsupported map type: {map_type}")

@@ -8,6 +8,8 @@ working locally (e.g. arm64 mac, the pypi wheel is x86_64 only)."""
 from __future__ import annotations
 
 import argparse
+import csv
+import os
 from dataclasses import dataclass
 from statistics import mean
 from typing import Protocol
@@ -16,22 +18,29 @@ from grid_battle import (
     BattleSnapshot,
     HeuristicAgent,
     MctsAgent,
-    PhaseAction,
     RandomAgent,
     TurnAction,
     UnitState,
     generate_preset_level,
     simulate_turn,
 )
+from grid_battle import combat as combat_module
 from grid_battle.combat import (
-    DEFAULT_COMBAT_RULES,
+    CombatRules,
     ITEM_MAP_CHARS,
     TERRAIN_BUNKER,
     TERRAIN_BUSH,
     TERRAIN_HILL,
     TERRAIN_MAP_CHARS,
+    UnitCombatProfile,
 )
-from grid_battle.pcg import MAP_SIZES, MAP_TYPES
+from grid_battle.pcg import (
+    ENEMY_COUNT_LEVELS,
+    ITEM_LEVELS,
+    MAP_SIZES,
+    MAP_TYPES,
+    WALL_DENSITY_LEVELS,
+)
 
 
 class Agent(Protocol):
@@ -51,7 +60,30 @@ def build_agent(name: str, *, mcts_iterations: int, seed: int) -> Agent:
     raise ValueError(f"Unknown agent: {name}")
 
 
-def snapshot_from_layout(layout: str) -> BattleSnapshot:
+def override_combat_rules(args: argparse.Namespace) -> CombatRules:
+    """Build a CombatRules from CLI overrides and install it as the module default.
+
+    The agents/simulator read combat.DEFAULT_COMBAT_RULES via get_unit_profile,
+    so the simplest way to vary stats per run is to reassign the module global
+    at the start of main().
+    """
+    rules = CombatRules(
+        player=UnitCombatProfile(
+            max_health=args.player_hp,
+            attack_damage=args.player_damage,
+            attack_range=args.player_range,
+        ),
+        enemy=UnitCombatProfile(
+            max_health=args.enemy_hp,
+            attack_damage=args.enemy_damage,
+            attack_range=args.enemy_range,
+        ),
+    )
+    combat_module.DEFAULT_COMBAT_RULES = rules
+    return rules
+
+
+def snapshot_from_layout(layout: str, rules: CombatRules) -> BattleSnapshot:
     rows = layout.splitlines()
     height = len(rows)
     width = len(rows[0])
@@ -68,9 +100,9 @@ def snapshot_from_layout(layout: str) -> BattleSnapshot:
             if ch == "W":
                 walls.add(pos)
             elif ch == "A":
-                player = UnitState(position=pos, health=DEFAULT_COMBAT_RULES.player.max_health)
+                player = UnitState(position=pos, health=rules.player.max_health)
             elif ch == "E":
-                enemies.append(UnitState(position=pos, health=DEFAULT_COMBAT_RULES.enemy.max_health))
+                enemies.append(UnitState(position=pos, health=rules.enemy.max_health))
             elif ch in TERRAIN_MAP_CHARS:
                 terrain_name = TERRAIN_MAP_CHARS[ch]
                 if terrain_name == TERRAIN_HILL:
@@ -102,6 +134,7 @@ class EpisodeResult:
     won: bool
     turns: int
     damage_taken: int
+    final_hp: int
     remaining_enemies: int
 
 
@@ -120,8 +153,33 @@ def run_episode(initial: BattleSnapshot, agent: Agent, max_steps: int) -> Episod
         won=state.remaining_enemies == 0 and state.player is not None,
         turns=state.player_turns,
         damage_taken=initial_health - final_health,
+        final_hp=final_health,
         remaining_enemies=state.remaining_enemies,
     )
+
+
+CSV_COLUMNS = [
+    "agent",
+    "size",
+    "map_type",
+    "items",
+    "enemy_count",
+    "wall_density",
+    "player_hp",
+    "enemy_hp",
+    "player_damage",
+    "enemy_damage",
+    "player_range",
+    "enemy_range",
+    "mcts_iterations",
+    "seed",
+    "episode",
+    "won",
+    "turns",
+    "damage_taken",
+    "final_hp",
+    "remaining_enemies",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -130,28 +188,101 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--size", choices=list(MAP_SIZES.keys()), default="small")
     parser.add_argument("--map-type", choices=list(MAP_TYPES), default="baseline")
-    parser.add_argument("--max-steps", type=int, default=40)
+    parser.add_argument("--max-steps", type=int, default=120)
     parser.add_argument("--agent", choices=AGENT_CHOICES, default="heuristic")
     parser.add_argument("--mcts-iterations", type=int, default=200)
+    # PCG overrides
+    parser.add_argument("--items", choices=list(ITEM_LEVELS), default="default")
+    parser.add_argument("--enemy-count", choices=list(ENEMY_COUNT_LEVELS), default="default")
+    parser.add_argument("--wall-density", choices=list(WALL_DENSITY_LEVELS), default="default")
+    # combat stat overrides
+    parser.add_argument("--player-hp", type=int, default=4)
+    parser.add_argument("--player-damage", type=int, default=1)
+    parser.add_argument("--player-range", type=int, default=1)
+    parser.add_argument("--enemy-hp", type=int, default=2)
+    parser.add_argument("--enemy-damage", type=int, default=1)
+    parser.add_argument("--enemy-range", type=int, default=1)
+    # output
+    parser.add_argument(
+        "--csv-out",
+        default=None,
+        help="If set, append one row per episode to this CSV (creates header if file is new).",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Skip the summary printout (useful when sweeping).",
+    )
     return parser.parse_args()
+
+
+def append_results_to_csv(
+    csv_path: str,
+    args: argparse.Namespace,
+    results: list[EpisodeResult],
+) -> None:
+    file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
+    os.makedirs(os.path.dirname(os.path.abspath(csv_path)) or ".", exist_ok=True)
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        if not file_exists:
+            writer.writeheader()
+        for i, r in enumerate(results):
+            writer.writerow({
+                "agent": args.agent,
+                "size": args.size,
+                "map_type": args.map_type,
+                "items": args.items,
+                "enemy_count": args.enemy_count,
+                "wall_density": args.wall_density,
+                "player_hp": args.player_hp,
+                "enemy_hp": args.enemy_hp,
+                "player_damage": args.player_damage,
+                "enemy_damage": args.enemy_damage,
+                "player_range": args.player_range,
+                "enemy_range": args.enemy_range,
+                "mcts_iterations": args.mcts_iterations,
+                "seed": args.seed,
+                "episode": i,
+                "won": int(r.won),
+                "turns": r.turns,
+                "damage_taken": r.damage_taken,
+                "final_hp": r.final_hp,
+                "remaining_enemies": r.remaining_enemies,
+            })
 
 
 def main() -> None:
     args = parse_args()
+    rules = override_combat_rules(args)
     agent = build_agent(args.agent, mcts_iterations=args.mcts_iterations, seed=args.seed)
     results: list[EpisodeResult] = []
     last_width = last_height = 0
 
     for i in range(args.episodes):
-        generated = generate_preset_level(size=args.size, map_type=args.map_type, seed=args.seed + i)
+        generated = generate_preset_level(
+            size=args.size,
+            map_type=args.map_type,
+            seed=args.seed + i,
+            item_level=args.items,
+            enemy_count=args.enemy_count,
+            wall_density=args.wall_density,
+        )
         last_width, last_height = generated.width, generated.height
-        initial = snapshot_from_layout(generated.layout)
+        initial = snapshot_from_layout(generated.layout, rules)
         results.append(run_episode(initial, agent, args.max_steps))
+
+    if args.csv_out:
+        append_results_to_csv(args.csv_out, args, results)
+
+    if args.quiet:
+        return
 
     wins = sum(r.won for r in results)
     win_rate = wins / len(results)
     avg_turns = mean(r.turns for r in results)
     avg_damage = mean(r.damage_taken for r in results)
+    avg_final_hp = mean(r.final_hp for r in results)
     losses = [r for r in results if not r.won]
     avg_remaining = mean(r.remaining_enemies for r in losses) if losses else 0.0
 
@@ -161,9 +292,12 @@ def main() -> None:
     print(f"Map type: {args.map_type}")
     print(f"Map size preset: {args.size}")
     print(f"Map dimensions: {last_width}x{last_height}")
+    print(f"Items: {args.items}, enemy_count: {args.enemy_count}, wall_density: {args.wall_density}")
+    print(f"Stats: player {args.player_hp}HP/{args.player_damage}dmg/{args.player_range}rng, enemy {args.enemy_hp}HP/{args.enemy_damage}dmg/{args.enemy_range}rng")
     print(f"Win rate: {win_rate:.1%}")
     print(f"Average turns: {avg_turns:.2f}")
     print(f"Average damage taken: {avg_damage:.2f}")
+    print(f"Average final HP: {avg_final_hp:.2f}")
     print(f"Average enemies left on losses: {avg_remaining:.2f}")
 
 

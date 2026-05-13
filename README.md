@@ -30,12 +30,14 @@ This repo contains a minimal demo that follows the core scope of the proposal:
 Python 3.11.
 
 Windows (PowerShell):
+
 ```powershell
 py -3.11 -m venv .venv
 py -3.11 -m pip install --target ".venv\Lib\site-packages" -r requirements.txt
 ```
 
 macOS (zsh):
+
 ```
 python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt
@@ -68,11 +70,13 @@ All three control the player. Enemies always use Griddly's built-in BFS chase.
 Both runners take the same flags: `--agent {heuristic,random,mcts}`, `--mcts-iterations`, `--size`, `--map-type`, `--episodes`, `--seed`, `--max-steps`. Use `--help` for defaults.
 
 With Griddly (Windows, Linux, intel mac):
+
 ```powershell
 & ".\.venv\Scripts\python.exe" .\evaluate_demo.py --agent mcts --episodes 50 --size small --map-type baseline --seed 11 --mcts-iterations 200
 ```
 
 Without Griddly (arm64 mac):
+
 ```
 .venv/bin/python evaluate_simulator.py --agent mcts --episodes 50 --size small --map-type baseline --seed 11 --mcts-iterations 200
 ```
@@ -86,3 +90,12 @@ If we continue from here, the most natural next increment is:
 1. compare win rate across obstacle densities and map types
 2. add a richer objective such as exit tiles or ranged enemies
 3. tune the MCTS iteration budget and shaping reward
+
+## Sweep
+
+Run
+
+```bash
+rm -rf results
+.venv/bin/python run_sweep.py --episodes 50
+```
