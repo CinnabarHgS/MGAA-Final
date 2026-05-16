@@ -286,6 +286,7 @@ class PhaseAction:
 @dataclass(frozen=True)
 class TurnAction:
     move_direction: int | None = None
+    move_directions: tuple[int, ...] = ()
     action: PhaseAction | None = None
     action2: PhaseAction | None = None
     activate_item: str | None = None
@@ -458,6 +459,7 @@ class GridBattleEnv:
         if on_bunker:
             turn = TurnAction(
                 move_direction=None,
+                move_directions=(),
                 action=turn.action,
                 action2=turn.action2,
                 activate_item=None,
@@ -521,10 +523,20 @@ class GridBattleEnv:
         active_names = {e.name for e in self._active_effects}
         desired_sequence: list[PhaseAction] = []
 
-        if turn.move_direction is not None:
-            desired_sequence.append(PhaseAction(action_type="move", direction=turn.move_direction))
-            if ITEM_VEHICLE in active_names:
-                desired_sequence.append(PhaseAction(action_type="move", direction=turn.move_direction))
+        move_sequence = list(turn.move_directions)
+        if not move_sequence and turn.move_direction is not None:
+            move_sequence = [turn.move_direction]
+
+        if ITEM_VEHICLE in active_names:
+            if turn.move_directions:
+                move_sequence = move_sequence[:2]
+            elif len(move_sequence) == 1:
+                move_sequence.append(move_sequence[0])
+        else:
+            move_sequence = move_sequence[:1]
+
+        for direction in move_sequence:
+            desired_sequence.append(PhaseAction(action_type="move", direction=direction))
 
         if turn.action is not None:
             if ITEM_GOLDEN_GUN in active_names:

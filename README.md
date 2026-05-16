@@ -19,6 +19,7 @@ This repo contains a minimal demo that follows the core scope of the proposal:
 - `grid_battle/pcg.py`: procedural map generation
 - `grid_battle/agents.py`: heuristic baseline agent
 - `play_demo.py`: command-line playable demo
+- `play_pygame.py`: pygame window demo with mouse-driven turn planning
 - `evaluate_demo.py`: batch evaluation over generated maps
 
 ## Install
@@ -41,6 +42,22 @@ Controls:
 - `move>` uses `w/a/s/d` to move, `Enter` to skip movement
 - `action>` uses `i/j/k/l` to attack, `Enter` to skip the action
 - `q`: quit
+
+## Run the pygame UI
+
+```powershell
+& ".\.venv\Scripts\python.exe" .\play_pygame.py
+```
+
+Window controls:
+
+- click the player to select it
+- click a blue tile to preview movement
+- click a red enemy to choose an attack
+- select an inventory item from the action panel to activate it this turn
+- `End Turn`: confirm the planned move, item use, and attacks
+- `Esc`: cancel the current preview or selection
+- `R`: reset the current map
 
 ## Run AI evaluation
 
