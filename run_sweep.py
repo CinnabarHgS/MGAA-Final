@@ -8,6 +8,11 @@ Defaults: medium random_walk, items/enemy_count/wall_density all default,
 player 4HP-1dmg-1rng, enemy 2HP-1dmg-1rng, mcts 200 iters, max-steps 120,
 seed 11, 50 episodes per cell.
 
+Resumable: if the output CSV already has rows for a (config, agent) cell
+matching the current --episodes count, that cell is skipped. Partially
+written cells (fewer rows than --episodes) get their old rows wiped and
+the cell is rerun from scratch.
+
 Usage:
     python run_sweep.py                       # full sweep, a few hours
     python run_sweep.py --episodes 5          # quick smoke test
@@ -18,9 +23,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Iterable
 
@@ -69,6 +76,23 @@ DEFAULT_FLAGS: dict[str, str] = {
     "enemy_range":   "--enemy-range",
 }
 
+# CSV columns that together identify a "cell" (one run of evaluate_simulator.py).
+# Must match the columns evaluate_simulator.py writes.
+CELL_KEY_COLUMNS = (
+    "agent",
+    "size",
+    "map_type",
+    "items",
+    "enemy_count",
+    "wall_density",
+    "player_hp",
+    "enemy_hp",
+    "player_damage",
+    "enemy_damage",
+    "player_range",
+    "enemy_range",
+)
+
 
 def build_command(
     *,
@@ -105,6 +129,23 @@ def build_command(
     return cmd
 
 
+def cell_key_for(
+    *,
+    agent: str,
+    swept_variable: str,
+    swept_value: str,
+) -> tuple[str, ...]:
+    """The CSV-row key that identifies this cell.
+
+    Built from DEFAULTS + the swept override + agent. Must be aligned with
+    CELL_KEY_COLUMNS so it can be compared against rows read from disk.
+    """
+    flag_values = dict(DEFAULTS)
+    flag_values[swept_variable] = swept_value
+    flag_values_with_agent = {"agent": agent, **flag_values}
+    return tuple(flag_values_with_agent[col] for col in CELL_KEY_COLUMNS)
+
+
 def iter_cells(only: list[str] | None) -> Iterable[tuple[str, str, str]]:
     """Yield (variable, level, agent) for every cell to run."""
     variables = list(VARIABLES.keys()) if not only else only
@@ -115,6 +156,89 @@ def iter_cells(only: list[str] | None) -> Iterable[tuple[str, str, str]]:
         for level in levels:
             for agent in AGENTS:
                 yield variable, level, agent
+
+
+def scan_existing_csv(
+    csv_path: str,
+    *,
+    expected_seed: int,
+    expected_mcts_iterations: int,
+) -> tuple[dict[tuple[str, ...], int], list[str]]:
+    """Read the CSV and return per-cell episode counts plus any warnings.
+
+    Rows whose seed / mcts_iterations dont match the current run are
+    ignored for skip-detection (and a warning is returned), so reruns
+    with different settings dont silently reuse stale data.
+    """
+    counts: dict[tuple[str, ...], int] = {}
+    warnings: list[str] = []
+    if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
+        return counts, warnings
+
+    mismatched_keys: set[tuple[str, ...]] = set()
+    with open(csv_path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            return counts, warnings
+        for row in reader:
+            try:
+                row_seed = int(row["seed"])
+                row_mcts = int(row["mcts_iterations"])
+            except (KeyError, ValueError):
+                # Malformed row, ignore.
+                continue
+            key = tuple(row[col] for col in CELL_KEY_COLUMNS)
+            if row_seed != expected_seed or (
+                row["agent"] == "mcts" and row_mcts != expected_mcts_iterations
+            ):
+                mismatched_keys.add(key)
+                continue
+            counts[key] = counts.get(key, 0) + 1
+
+    if mismatched_keys:
+        warnings.append(
+            f"Ignored {len(mismatched_keys)} cell(s) in CSV with mismatched "
+            f"seed/mcts_iterations (will be re-run and old rows wiped)."
+        )
+    return counts, warnings
+
+
+def rewrite_csv_without_keys(
+    csv_path: str,
+    keys_to_drop: set[tuple[str, ...]],
+) -> int:
+    """Rewrite csv_path keeping only rows whose CELL_KEY_COLUMNS tuple isnt in keys_to_drop.
+
+    Atomic: writes to a temp file in the same directory, then os.replace.
+    Returns the number of rows removed.
+    """
+    if not keys_to_drop or not os.path.exists(csv_path):
+        return 0
+
+    removed = 0
+    dirpath = os.path.dirname(os.path.abspath(csv_path)) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".sweep_tmp_", dir=dirpath)
+    try:
+        with os.fdopen(fd, "w", newline="") as out_f, open(csv_path, "r", newline="") as in_f:
+            reader = csv.DictReader(in_f)
+            if reader.fieldnames is None:
+                # Empty/headerless file, just leave it alone.
+                os.unlink(tmp_path)
+                return 0
+            writer = csv.DictWriter(out_f, fieldnames=reader.fieldnames)
+            writer.writeheader()
+            for row in reader:
+                key = tuple(row.get(col, "") for col in CELL_KEY_COLUMNS)
+                if key in keys_to_drop:
+                    removed += 1
+                    continue
+                writer.writerow(row)
+        os.replace(tmp_path, csv_path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+    return removed
 
 
 def parse_args() -> argparse.Namespace:
@@ -154,14 +278,45 @@ def main() -> None:
     if not args.dry_run:
         os.makedirs(os.path.dirname(os.path.abspath(args.csv_out)) or ".", exist_ok=True)
 
-    print(f"Plan: {total} cells, {args.episodes} episodes each "
-          f"= {total * args.episodes} total episodes")
+    # Read whats already on disk, decide which cells to skip vs wipe-and-rerun.
+    existing_counts, scan_warnings = scan_existing_csv(
+        args.csv_out,
+        expected_seed=args.seed,
+        expected_mcts_iterations=args.mcts_iterations,
+    )
+    for w in scan_warnings:
+        print(f"warning: {w}")
+
+    cells_to_skip: set[tuple[str, str, str]] = set()
+    keys_to_wipe: set[tuple[str, ...]] = set()
+    for variable, level, agent in cells:
+        key = cell_key_for(agent=agent, swept_variable=variable, swept_value=level)
+        count = existing_counts.get(key, 0)
+        if count == args.episodes:
+            cells_to_skip.add((variable, level, agent))
+        elif count > 0:
+            # Partial: wipe and rerun. Also covers count > episodes (changed --episodes).
+            keys_to_wipe.add(key)
+
+    if keys_to_wipe and not args.dry_run:
+        removed = rewrite_csv_without_keys(args.csv_out, keys_to_wipe)
+        print(f"Wiped {removed} stale/partial row(s) across {len(keys_to_wipe)} cell(s).")
+    elif keys_to_wipe:
+        print(f"(dry run) would wipe rows for {len(keys_to_wipe)} partial/stale cell(s).")
+
+    to_run = total - len(cells_to_skip)
+    print(f"Plan: {total} cells total, {len(cells_to_skip)} already done, {to_run} to run, "
+          f"{args.episodes} episodes each = {to_run * args.episodes} new episodes")
     print(f"CSV output: {args.csv_out}")
     if args.dry_run:
         print("(dry run, no commands will execute)\n")
 
     started = time.time()
+    ran = 0
     for i, (variable, level, agent) in enumerate(cells, start=1):
+        if (variable, level, agent) in cells_to_skip:
+            print(f"[{i}/{total}] {variable}={level} agent={agent} -- skip (already done)")
+            continue
         cmd = build_command(
             python_exe=args.python,
             agent=agent,
@@ -174,6 +329,7 @@ def main() -> None:
             csv_out=args.csv_out,
         )
         elapsed = time.time() - started
+        ran += 1
         print(f"[{i}/{total}] {variable}={level} agent={agent} (elapsed {elapsed:.0f}s)")
         if args.dry_run:
             print("  " + " ".join(cmd))
@@ -185,7 +341,8 @@ def main() -> None:
             raise SystemExit(result.returncode)
 
     elapsed = time.time() - started
-    print(f"\nDone. {total} cells in {elapsed:.0f}s. CSV: {args.csv_out}")
+    print(f"\nDone. Ran {ran} cell(s) ({len(cells_to_skip)} skipped) in {elapsed:.0f}s. "
+          f"CSV: {args.csv_out}")
 
 
 if __name__ == "__main__":
