@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
-    from .game import BattleSnapshot
+    from .state import BattleSnapshot
 
 
 DIRECTION_TO_DELTA = {
@@ -77,8 +77,12 @@ def get_unit_profile(
     snapshot: BattleSnapshot | None,
     unit_name: str,
     position: tuple[int, int] | None = None,
-    rules: CombatRules = DEFAULT_COMBAT_RULES,
+    rules: CombatRules | None = None,
 ) -> UnitCombatProfile:
+    # read DEFAULT_COMBAT_RULES at call time, not at function-def time, so
+    # callers can override the module global before running a sweep.
+    if rules is None:
+        rules = DEFAULT_COMBAT_RULES
     if unit_name == "player":
         base_profile = rules.player
     elif unit_name == "enemy":

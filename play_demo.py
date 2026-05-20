@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import random
 
 from grid_battle.combat import DEFAULT_COMBAT_RULES, ITEM_DUAL_BERETTAS, ITEM_MAP_CHARS, TERRAIN_MAP_CHARS
 from grid_battle.game import BattleSnapshot, GridBattleEnv, PhaseAction, TurnAction
-from grid_battle.pcg import DEFAULT_LEVEL, generate_level
+from grid_battle.pcg import DEFAULT_LEVEL, MAP_SIZES, MAP_TYPES, generate_level, generate_preset_level
 
-_ITEM_DISPLAY = {v: k for k, v in ITEM_MAP_CHARS.items()}
-_TERRAIN_DISPLAY = {v: k for k, v in TERRAIN_MAP_CHARS.items()}
+_ITEM_DISPLAY = {value: key for key, value in ITEM_MAP_CHARS.items()}
+_TERRAIN_DISPLAY = {value: key for key, value in TERRAIN_MAP_CHARS.items()}
 
 MOVE_KEYS = {
     "w": 1,
@@ -26,13 +27,39 @@ ATTACK_KEYS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Play the GridBattle proposal demo.")
-    parser.add_argument("--random-map", action="store_true", help="Generate a fresh map instead of using the fixed demo map.")
-    parser.add_argument("--seed", type=int, default=7, help="Seed for random map generation.")
-    parser.add_argument("--width", type=int, default=9, help="Map width for random generation.")
-    parser.add_argument("--height", type=int, default=7, help="Map height for random generation.")
-    parser.add_argument("--enemies", type=int, default=2, help="Enemy count for random generation.")
-    parser.add_argument("--obstacle-density", type=float, default=0.18, help="Wall density for random generation.")
-    parser.add_argument("--max-steps", type=int, default=40, help="Maximum player turns before the episode stops.")
+    parser.add_argument(
+        "--random-map",
+        action="store_true",
+        help="Generate a fresh map instead of using the fixed demo map.",
+    )
+    parser.add_argument("--seed", type=int, default=random.randint(0, 9999), help="Seed for random map generation.")
+    parser.add_argument("--width", type=int, default=9, help="Map width for custom random generation.")
+    parser.add_argument("--height", type=int, default=7, help="Map height for custom random generation.")
+    parser.add_argument("--enemies", type=int, default=2, help="Enemy count for custom random generation.")
+    parser.add_argument(
+        "--obstacle-density",
+        type=float,
+        default=0.18,
+        help="Wall density for custom random generation.",
+    )
+    parser.add_argument(
+        "--size",
+        choices=list(MAP_SIZES.keys()),
+        default=None,
+        help="Optional preset size for random-map generation.",
+    )
+    parser.add_argument(
+        "--map-type",
+        choices=list(MAP_TYPES),
+        default="baseline",
+        help="PCG generator type when using --size.",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=40,
+        help="Maximum player turns before the episode stops.",
+    )
     return parser.parse_args()
 
 
@@ -40,13 +67,20 @@ def _load_level(args: argparse.Namespace) -> str:
     if not args.random_map:
         return DEFAULT_LEVEL
 
-    generated = generate_level(
-        width=args.width,
-        height=args.height,
-        enemy_count=args.enemies,
-        obstacle_density=args.obstacle_density,
-        seed=args.seed,
-    )
+    if args.size is not None:
+        generated = generate_preset_level(
+            size=args.size,
+            map_type=args.map_type,
+            seed=args.seed,
+        )
+    else:
+        generated = generate_level(
+            width=args.width,
+            height=args.height,
+            enemy_count=args.enemies,
+            obstacle_density=args.obstacle_density,
+            seed=args.seed,
+        )
     return generated.layout
 
 
@@ -71,15 +105,16 @@ def _render_map(snapshot: BattleSnapshot) -> str:
 
 def _health_bar(current: int, maximum: int, width: int = 10) -> str:
     filled = max(0, round(current / maximum * width))
-    return "[" + "█" * filled + "░" * (width - filled) + "]"
+    return "[" + "#" * filled + "." * (width - filled) + "]"
 
 
-def _describe_turn(before, after, history: list[dict]) -> str:
+def _describe_turn(before: BattleSnapshot, after: BattleSnapshot, history: list[dict]) -> str:
     notes: list[str] = []
     player_events = [event for event in history if event["PlayerId"] == 1]
 
     player_health_before = before.player.health if before.player else 0
     player_health_after = after.player.health if after.player else 0
+
     if player_health_after < player_health_before:
         notes.append(f"enemy hit you for {player_health_before - player_health_after}")
 
@@ -94,10 +129,14 @@ def _describe_turn(before, after, history: list[dict]) -> str:
     if any(event["ActionName"] == "wait" for event in player_events):
         notes.append("you waited")
 
-    if any(
-        event["ActionName"] == "move" and event["DestinationObjectName"] == "enemy"
-        for event in player_events
-    ) and "your attack connected" not in notes:
+    if (
+        any(
+            event["ActionName"] == "move"
+            and event["DestinationObjectName"] == "enemy"
+            for event in player_events
+        )
+        and "your attack connected" not in notes
+    ):
         notes.append("you bumped into an enemy instead of moving")
 
     if after.inventory and len(after.inventory) > len(before.inventory):
@@ -127,7 +166,7 @@ def _read_phase_input(prompt: str, mapping: dict[str, int], help_text: str) -> i
 def _read_item_input(inventory: tuple[str, ...]) -> str | None | str:
     if not inventory:
         return None
-    choices = {str(i + 1): item for i, item in enumerate(inventory)}
+    choices = {str(index + 1): item for index, item in enumerate(inventory)}
     while True:
         try:
             key = input("item> ").strip().lower()
@@ -141,13 +180,14 @@ def _read_item_input(inventory: tuple[str, ...]) -> str | None | str:
         if key in choices:
             return choices[key]
 
-        options = ", ".join(f"{k}={v}" for k, v in choices.items())
+        options = ", ".join(f"{key}={value}" for key, value in choices.items())
         print(f"Choose item: {options}, or Enter to skip.")
 
 
 def main() -> None:
     args = parse_args()
     level = _load_level(args)
+
     env = GridBattleEnv(level, max_steps=args.max_steps)
     snapshot = env.reset()
     max_hp = DEFAULT_COMBAT_RULES.player.max_health
@@ -156,7 +196,13 @@ def main() -> None:
     print("Goal: defeat all enemies before they defeat you.")
     print("Move: w/a/s/d  Attack: i/j/k/l  Skip phase: Enter  Quit: q")
     print("Terrain: H=hill(+range)  B=bush(50% dodge)  K=bunker(immune+no move 1 turn)")
-    # print("Items: pick up by walking over. Activate with item> prompt (1/2/3...).")
+    if args.random_map and args.size is not None:
+        print(f"Generated map: type={args.map_type}, size={args.size}, seed={args.seed}")
+    elif args.random_map:
+        print(
+            f"Generated map: {args.width}x{args.height}, enemies={args.enemies}, "
+            f"density={args.obstacle_density:.2f}, seed={args.seed}"
+        )
     print()
 
     while True:
@@ -177,10 +223,10 @@ def main() -> None:
             f"Enemies {snapshot.remaining_enemies}{terrain_str}"
         )
         if snapshot.inventory:
-            inv_str = ", ".join(f"{i+1}:{item}" for i, item in enumerate(snapshot.inventory))
+            inv_str = ", ".join(f"{index + 1}:{item}" for index, item in enumerate(snapshot.inventory))
             print(f"Inventory: {inv_str}")
         if snapshot.active_effects:
-            eff_str = ", ".join(f"{e.name}({e.turns_left})" for e in snapshot.active_effects)
+            eff_str = ", ".join(f"{effect.name}({effect.turns_left})" for effect in snapshot.active_effects)
             print(f"Active: {eff_str}")
 
         if snapshot.player is None:
@@ -209,7 +255,7 @@ def main() -> None:
             break
 
         action2 = None
-        if any(e.name == ITEM_DUAL_BERETTAS for e in snapshot.active_effects):
+        if any(effect.name == ITEM_DUAL_BERETTAS for effect in snapshot.active_effects):
             attack_direction2 = _read_phase_input(
                 "action2> ",
                 ATTACK_KEYS,
@@ -235,6 +281,7 @@ def main() -> None:
         previous = snapshot
         snapshot, reward, done, info = env.step(turn_action)
         del reward
+
         print(_describe_turn(previous, snapshot, info.get("History", [])))
         print()
 

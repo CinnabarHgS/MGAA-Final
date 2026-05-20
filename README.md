@@ -1,49 +1,57 @@
 # GridBattle Demo
 
-This repo contains a minimal demo that follows the core scope of the proposal:
+This repo contains a minimal tactical grid-battle prototype built around four layers:
 
-1. a tiny turn-based grid battle in Griddly
+1. a Griddly battle environment
 2. a procedural map generator
-3. a simple heuristic AI for automated evaluation
+3. several AI baselines plus MCTS evaluation
+4. a pygame presentation layer for mouse-driven play
 
-## Milestones
+## File Layout
 
-- `Milestone 1`: player, enemies, walls, melee combat, win/lose condition
-- `Milestone 2`: random map generation with playability checks
-- `Milestone 3`: baseline AI that plays generated maps and reports win rate, turns, and damage taken
-
-## File layout
-
-- `grid_battle/game.py`: Griddly environment wrapper and state parsing
-- `grid_battle/combat.py`: shared combat rules and helper functions for range/damage logic
-- `grid_battle/pcg.py`: procedural map generation
-- `grid_battle/agents.py`: heuristic baseline agent
+- `grid_battle/game.py`: Griddly env wrapper and turn encoding
+- `grid_battle/state.py`: snapshot/action dataclasses with no Griddly dependency
+- `grid_battle/combat.py`: combat rules plus range/damage helpers
+- `grid_battle/pcg.py`: procedural map generation, presets, and structural analysis
+- `grid_battle/agents.py`: `HeuristicAgent`, `RandomAgent`, and `heuristic_turn()`
+- `grid_battle/simulator.py`: pure-Python forward model used by MCTS
+- `grid_battle/mcts.py`: `MctsAgent` (UCT search)
 - `play_demo.py`: command-line playable demo
 - `play_pygame.py`: pygame window demo with mouse-driven turn planning
-- `evaluate_demo.py`: batch evaluation over generated maps
+- `evaluate_demo.py`: batch evaluation through Griddly
+- `evaluate_simulator.py`: batch evaluation through the pure-Python simulator
+- `inspect_pcg.py`: structural map inspection helper
+- `run_sweep.py`: OFAT sweep runner for experiment batches
 
 ## Install
 
-The local environment in this workspace uses Python 3.11.
+Python 3.11.
+
+Windows (PowerShell):
 
 ```powershell
 py -3.11 -m venv .venv
 py -3.11 -m pip install --target ".venv\Lib\site-packages" -r requirements.txt
 ```
 
-## Run the playable demo
+macOS / Linux:
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+`griddly` only ships an x86_64 wheel on PyPI, so it does not install on arm64 macs. The simulator-based tooling still works there.
+
+## Play The Demo
+
+CLI:
 
 ```powershell
 & ".\.venv\Scripts\python.exe" .\play_demo.py
 ```
 
-Controls:
-
-- `move>` uses `w/a/s/d` to move, `Enter` to skip movement
-- `action>` uses `i/j/k/l` to attack, `Enter` to skip the action
-- `q`: quit
-
-## Run the pygame UI
+Pygame UI:
 
 ```powershell
 & ".\.venv\Scripts\python.exe" .\play_pygame.py
@@ -59,22 +67,42 @@ Window controls:
 - `Esc`: cancel the current preview or selection
 - `R`: reset the current map
 
-## Run AI evaluation
+## Agents
+
+- `HeuristicAgent`: attacks immediately when possible, otherwise moves toward attackable tiles
+- `RandomAgent`: uniformly random legal-move baseline
+- `MctsAgent`: UCT search using the pure-Python simulator for rollouts
+
+All three control the player. Enemies always use the built-in chase logic from the environment.
+
+## Evaluation
+
+Both evaluation runners support preset PCG maps via `--size` and `--map-type`.
+
+Griddly evaluation:
 
 ```powershell
-& ".\.venv\Scripts\python.exe" .\evaluate_demo.py --episodes 20
+& ".\.venv\Scripts\python.exe" .\evaluate_demo.py --agent mcts --episodes 50 --size small --map-type baseline --seed 11 --mcts-iterations 200
 ```
 
-You can vary generation parameters, for example:
+Pure-Python evaluation:
 
 ```powershell
-& ".\.venv\Scripts\python.exe" .\evaluate_demo.py --episodes 30 --width 11 --height 9 --enemies 3 --obstacle-density 0.18
+& ".\.venv\Scripts\python.exe" .\evaluate_simulator.py --agent mcts --episodes 50 --size small --map-type baseline --seed 11 --mcts-iterations 200
 ```
 
-## Suggested next step
+The simulator does not reproduce every Griddly behavior exactly, but it is useful for agent ranking and sweep automation when Griddly is unavailable.
 
-If we continue from here, the most natural next increment is:
+## PCG Inspection
 
-1. replace the heuristic with MCTS
-2. compare win rate across obstacle densities
-3. add a richer objective such as exit tiles or ranged enemies
+```powershell
+& ".\.venv\Scripts\python.exe" .\inspect_pcg.py --count 3 --size small --map-type random_walk
+```
+
+## Sweeps
+
+```powershell
+& ".\.venv\Scripts\python.exe" .\run_sweep.py --episodes 50
+```
+
+Outputs are written under `results_analysis/` and CSV experiment logs.

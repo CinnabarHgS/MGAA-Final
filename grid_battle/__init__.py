@@ -1,4 +1,4 @@
-from .agents import HeuristicAgent
+from .agents import HeuristicAgent, RandomAgent, heuristic_turn
 from .combat import (
     ITEM_DUAL_BERETTAS,
     ITEM_DURATIONS,
@@ -20,46 +20,85 @@ from .combat import (
     get_unit_profile,
     positions_that_can_attack_target,
 )
-from .game import (
-    ATTACK_ACTION,
-    MOVE_ACTION,
-    RANGED_ATTACK_ACTION,
-    WAIT_ACTION,
-    GridBattleEnv,
-    PhaseAction,
-    TurnAction,
+from .mcts import MctsAgent
+from .pcg import (
+    BASELINE_PRESETS,
+    DEFAULT_LEVEL,
+    ENEMY_COUNT_LEVELS,
+    ITEM_LEVELS,
+    MAP_SIZES,
+    MAP_TYPES,
+    WALL_DENSITY_LEVELS,
+    GenerationPreset,
+    GeneratedLevel,
+    MapAnalysis,
+    analyze_level,
+    format_analysis,
+    generate_level,
+    generate_preset_level,
 )
-from .pcg import DEFAULT_LEVEL, GeneratedLevel, generate_level
+from .simulator import simulate_turn
+from .state import BattleSnapshot, PhaseAction, TurnAction, UnitState
+
+try:
+    from .game import (
+        ATTACK_ACTION,
+        MOVE_ACTION,
+        RANGED_ATTACK_ACTION,
+        WAIT_ACTION,
+        GridBattleEnv,
+    )
+except ImportError:  # pragma: no cover
+    ATTACK_ACTION = MOVE_ACTION = RANGED_ATTACK_ACTION = WAIT_ACTION = None  # type: ignore[assignment]
+    GridBattleEnv = None  # type: ignore[assignment]
+
 
 __all__ = [
     "ATTACK_ACTION",
     "ActiveEffect",
+    "BASELINE_PRESETS",
+    "BattleSnapshot",
     "CombatRules",
     "DEFAULT_LEVEL",
     "DEFAULT_COMBAT_RULES",
     "DIRECTION_NAMES",
+    "ENEMY_COUNT_LEVELS",
+    "GenerationPreset",
     "GeneratedLevel",
     "GridBattleEnv",
     "HeuristicAgent",
     "ITEM_DUAL_BERETTAS",
     "ITEM_DURATIONS",
     "ITEM_GOLDEN_GUN",
+    "ITEM_LEVELS",
     "ITEM_MAP_CHARS",
     "ITEM_SHOTGUN",
     "ITEM_VEHICLE",
+    "MAP_SIZES",
+    "MAP_TYPES",
     "MOVE_ACTION",
+    "MapAnalysis",
+    "MctsAgent",
     "PhaseAction",
     "RANGED_ATTACK_ACTION",
+    "RandomAgent",
     "TERRAIN_BUNKER",
     "TERRAIN_BUSH",
     "TERRAIN_HILL",
     "TERRAIN_MAP_CHARS",
     "TurnAction",
     "UnitCombatProfile",
+    "UnitState",
     "WAIT_ACTION",
+    "WALL_DENSITY_LEVELS",
+    "analyze_level",
     "find_attack_action",
     "find_attack_direction",
+    "format_analysis",
     "generate_level",
+    "generate_preset_level",
     "get_unit_profile",
+    "heuristic_turn",
     "positions_that_can_attack_target",
+    "simulate_turn",
 ]

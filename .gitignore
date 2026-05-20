@@ -2,4 +2,5 @@
 .vendor/
 __pycache__/
 *.pyc
-
+.vscode/
+results/
