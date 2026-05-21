@@ -2,5 +2,6 @@
 .vendor/
 __pycache__/
 *.pyc
+.idea/
 .vscode/
 results/
