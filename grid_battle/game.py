@@ -158,7 +158,7 @@ Actions:
                   - remove: true
                   - reward: 1
 
-  - Name: enemy_turn
+  - Name: enemy_move
     InputMapping:
       Inputs:
         1:
@@ -179,7 +179,59 @@ Actions:
           Object: enemy
           Commands:
             - exec:
-                Action: enemy_turn
+                Action: enemy_attack
+                Delay: 0
+                Search:
+                  ImpassableObjects: [wall, enemy]
+                  TargetObjectName: player
+        Dst:
+          Object: player
+      - Src:
+          Object: enemy
+          Commands:
+            - mov: _dest
+            - exec:
+                Action: enemy_attack
+                Delay: 0
+                Search:
+                  ImpassableObjects: [wall, enemy]
+                  TargetObjectName: player
+        Dst:
+          Object: _empty
+      - Src:
+          Object: enemy
+          Commands:
+            - exec:
+                Action: enemy_attack
+                Delay: 0
+                Search:
+                  ImpassableObjects: [wall, enemy]
+                  TargetObjectName: player
+        Dst:
+          Object: [wall, enemy]
+
+  - Name: enemy_attack
+    InputMapping:
+      Inputs:
+        1:
+          Description: Up
+          VectorToDest: [0, -1]
+        2:
+          Description: Right
+          VectorToDest: [1, 0]
+        3:
+          Description: Down
+          VectorToDest: [0, 1]
+        4:
+          Description: Left
+          VectorToDest: [-1, 0]
+      Internal: true
+    Behaviours:
+      - Src:
+          Object: enemy
+          Commands:
+            - exec:
+                Action: enemy_move
                 Delay: 1
                 Search:
                   ImpassableObjects: [wall, enemy]
@@ -195,9 +247,8 @@ Actions:
       - Src:
           Object: enemy
           Commands:
-            - mov: _dest
             - exec:
-                Action: enemy_turn
+                Action: enemy_move
                 Delay: 1
                 Search:
                   ImpassableObjects: [wall, enemy]
@@ -208,7 +259,7 @@ Actions:
           Object: enemy
           Commands:
             - exec:
-                Action: enemy_turn
+                Action: enemy_move
                 Delay: 1
                 Search:
                   ImpassableObjects: [wall, enemy]
@@ -234,8 +285,8 @@ Objects:
       - Name: health
         InitialValue: __ENEMY_MAX_HEALTH__
     InitialActions:
-      - Action: enemy_turn
-        Delay: 1
+      - Action: enemy_move
+        Delay: 0
         Search:
           ImpassableObjects: [wall, enemy]
           TargetObjectName: player
