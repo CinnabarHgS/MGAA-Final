@@ -4,11 +4,9 @@ import math
 import random
 from dataclasses import dataclass, field
 
-from .agents import _choose_item_to_activate, heuristic_turn
+from .agents import heuristic_turn
 from .combat import (
     DIRECTION_TO_DELTA,
-    ITEM_DUAL_BERETTAS,
-    ITEM_VEHICLE,
     find_attack_action,
     get_unit_profile,
 )
@@ -17,17 +15,6 @@ from .simulator import simulate_turn
 
 
 def _legal_turns(snapshot: BattleSnapshot) -> list[TurnAction]:
-    """Return the full set of legal TurnActions for the current state.
-
-    Covers:
-    * Single-step moves in all four cardinal directions (or stay in place).
-    * Two-step moves when the vehicle effect is active.
-    * Primary attack (melee or ranged) from the post-move position.
-    * Second attack (action2) when dual_berettas is active and a second
-      target is reachable from the same post-move position.
-    * Item activation: every base turn is duplicated with the highest-
-      priority unused item activated alongside it.
-    """
     if snapshot.player is None or not snapshot.enemies:
         return [TurnAction()]
 
@@ -35,17 +22,26 @@ def _legal_turns(snapshot: BattleSnapshot) -> list[TurnAction]:
     enemy_positions = {enemy.position for enemy in snapshot.enemies}
     walls = set(snapshot.walls)
     blocked = walls | enemy_positions
-    active_names = {e.name for e in snapshot.active_effects}
 
-    has_vehicle = ITEM_VEHICLE in active_names
-    has_dual_berettas = ITEM_DUAL_BERETTAS in active_names
+    move_options: list[int | None] = [None]
+    for direction, (dx, dy) in DIRECTION_TO_DELTA.items():
+        target = (player_position[0] + dx, player_position[1] + dy)
+        if not (0 <= target[0] < snapshot.width and 0 <= target[1] < snapshot.height):
+            continue
+        if target in blocked:
+            continue
+        move_options.append(direction)
 
-    # ------------------------------------------------------------------ #
-    # Helper: compute all attack PhaseActions reachable from a position   #
-    # ------------------------------------------------------------------ #
-    def get_attacks(post_move: tuple[int, int]) -> list[PhaseAction | None]:
+    turns: list[TurnAction] = []
+    for move in move_options:
+        if move is None:
+            post_move = player_position
+        else:
+            dx, dy = DIRECTION_TO_DELTA[move]
+            post_move = (player_position[0] + dx, player_position[1] + dy)
+
         profile = get_unit_profile(snapshot, "player", post_move)
-        options: list[PhaseAction | None] = [None]
+        attack_actions: list[PhaseAction | None] = [None]
         for enemy in snapshot.enemies:
             result = find_attack_action(
                 post_move,
@@ -55,117 +51,11 @@ def _legal_turns(snapshot: BattleSnapshot) -> list[TurnAction]:
             )
             if result is not None:
                 attack = PhaseAction(result[0], result[1])
-                if attack not in options:
-                    options.append(attack)
-        return options
+                if attack not in attack_actions:
+                    attack_actions.append(attack)
 
-    # ------------------------------------------------------------------ #
-    # Helper: compute second-attack options (must differ from primary)    #
-    # ------------------------------------------------------------------ #
-    def get_action2_options(
-        post_move: tuple[int, int], primary: PhaseAction
-    ) -> list[PhaseAction]:
-        profile = get_unit_profile(snapshot, "player", post_move)
-        options: list[PhaseAction] = []
-        for enemy in snapshot.enemies:
-            result = find_attack_action(
-                post_move,
-                enemy.position,
-                profile.attack_range,
-                blocking_positions=walls | (enemy_positions - {enemy.position}),
-            )
-            if result is not None:
-                a2 = PhaseAction(result[0], result[1])
-                if a2 != primary and a2 not in options:
-                    options.append(a2)
-        return options
-
-    turns: list[TurnAction] = []
-
-    # ------------------------------------------------------------------ #
-    # Single-step move options                                            #
-    # ------------------------------------------------------------------ #
-    single_step_moves: list[int | None] = [None]
-    for direction, (dx, dy) in DIRECTION_TO_DELTA.items():
-        target = (player_position[0] + dx, player_position[1] + dy)
-        if not (0 <= target[0] < snapshot.width and 0 <= target[1] < snapshot.height):
-            continue
-        if target in blocked:
-            continue
-        single_step_moves.append(direction)
-
-    for move in single_step_moves:
-        if move is None:
-            post_move = player_position
-        else:
-            dx, dy = DIRECTION_TO_DELTA[move]
-            post_move = (player_position[0] + dx, player_position[1] + dy)
-
-        for attack in get_attacks(post_move):
+        for attack in attack_actions:
             turns.append(TurnAction(move_direction=move, action=attack))
-
-            # Dual berettas: add a second attack on a different target.
-            if has_dual_berettas and attack is not None:
-                for a2 in get_action2_options(post_move, attack):
-                    turns.append(
-                        TurnAction(move_direction=move, action=attack, action2=a2)
-                    )
-
-    # ------------------------------------------------------------------ #
-    # Two-step move options  (vehicle only)                               #
-    # ------------------------------------------------------------------ #
-    if has_vehicle:
-        for dir1, (dx1, dy1) in DIRECTION_TO_DELTA.items():
-            step1 = (player_position[0] + dx1, player_position[1] + dy1)
-            if step1 in blocked or not (
-                0 <= step1[0] < snapshot.width and 0 <= step1[1] < snapshot.height
-            ):
-                continue
-            for dir2, (dx2, dy2) in DIRECTION_TO_DELTA.items():
-                step2 = (step1[0] + dx2, step1[1] + dy2)
-                if step2 in blocked or not (
-                    0 <= step2[0] < snapshot.width
-                    and 0 <= step2[1] < snapshot.height
-                ):
-                    continue
-                post_move = step2
-
-                for attack in get_attacks(post_move):
-                    turns.append(
-                        TurnAction(
-                            move_direction=dir1,
-                            move_directions=(dir1, dir2),
-                            action=attack,
-                        )
-                    )
-
-                    if has_dual_berettas and attack is not None:
-                        for a2 in get_action2_options(post_move, attack):
-                            turns.append(
-                                TurnAction(
-                                    move_direction=dir1,
-                                    move_directions=(dir1, dir2),
-                                    action=attack,
-                                    action2=a2,
-                                )
-                            )
-
-    # ------------------------------------------------------------------ #
-    # Item activation: duplicate every base turn with the best item       #
-    # ------------------------------------------------------------------ #
-    best_item = _choose_item_to_activate(snapshot)
-    if best_item is not None:
-        base_turns = list(turns)  # snapshot before extending to avoid infinite generator loop
-        turns.extend(
-            TurnAction(
-                move_direction=t.move_direction,
-                move_directions=t.move_directions,
-                action=t.action,
-                action2=t.action2,
-                activate_item=best_item,
-            )
-            for t in base_turns
-        )
 
     return turns
 
