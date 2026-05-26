@@ -282,19 +282,76 @@ def _finalize_generated_candidate(
 
 
 
-ITEM_LEVELS = ("none", "default", "double")
+ITEM_LEVELS = ("few", "normal", "many", "none", "default", "double")
 
 
-def _pools_for_item_level(item_level: str) -> tuple[list[str], list[str], bool]:
-    """Return (terrain_pool, item_pool, allow_golden_gun) for a given level name."""
+def _pools_for_item_level(
+    item_level: str,
+    free_count: int | None = None,
+) -> tuple[list[str], list[str], bool]:
+    """Return (terrain_pool, item_pool, allow_golden_gun) for a given level.
+
+    The main experiment levels are:
+
+    - few:    sparse terrain/items, but still includes items
+    - normal: regular amount of terrain/items
+    - many:   resource-rich maps
+
+    Counts scale with the number of free cells, so larger maps receive more
+    terrain and items in absolute terms.
+
+    Backwards-compatible aliases:
+    - default -> normal
+    - double  -> many
+    - none    -> no terrain/items
+    """
+
+    aliases = {
+        "default": "normal",
+        "double": "many",
+    }
+
+    item_level = aliases.get(item_level, item_level)
+
     if item_level == "none":
         return [], [], False
-    if item_level == "default":
-        return list("HHBBK"), ["D", "V", "S"], True
-    if item_level == "double":
-        return list("HHHHBBBBKK"), ["D", "D", "V", "V", "S", "S"], True
-    raise ValueError(f"Unknown item_level: {item_level!r}. Choose from {ITEM_LEVELS}.")
 
+    if item_level not in {"few", "normal", "many"}:
+        raise ValueError(f"Unknown item_level: {item_level!r}. Choose from {ITEM_LEVELS}.")
+
+    free_count = max(0, free_count or 0)
+
+    if item_level == "few":
+        terrain_fraction = 0.06
+        item_fraction = 0.025
+    elif item_level == "normal":
+        terrain_fraction = 0.10
+        item_fraction = 0.04
+    else:  # many
+        terrain_fraction = 0.16
+        item_fraction = 0.06
+
+    terrain_count = round(free_count * terrain_fraction)
+    item_count = round(free_count * item_fraction)
+
+    if free_count > 0:
+        terrain_count = max(2, terrain_count)
+        item_count = max(1, item_count)
+
+    # Avoid overfilling very small or very dense maps.
+    terrain_count = min(terrain_count, max(0, free_count // 2))
+    item_count = min(item_count, max(0, free_count - terrain_count))
+
+    def cycle_pool(symbols: str, count: int) -> list[str]:
+        return [symbols[i % len(symbols)] for i in range(count)]
+
+    # Terrain is weighted toward hills/bushes, with fewer bunkers.
+    terrain_pool = cycle_pool("HHBBK", terrain_count)
+
+    # Items are cycled so all core item types remain represented over time.
+    item_pool = cycle_pool("DVS", item_count)
+
+    return terrain_pool, item_pool, True
 
 def _place_terrain_and_items(
     grid: list[list[str]],
@@ -312,7 +369,7 @@ def _place_terrain_and_items(
     ]
     rng.shuffle(free)
 
-    terrain_pool, item_pool, allow_golden_gun = _pools_for_item_level(item_level)
+    terrain_pool, item_pool, allow_golden_gun = _pools_for_item_level(item_level, free_count=len(free))
 
     for i, (tx, ty) in enumerate(free[: len(terrain_pool)]):
         grid[ty][tx] = terrain_pool[i]
@@ -1180,8 +1237,8 @@ def generate_arena_level(
 WALL_DENSITY_LEVELS = ("low", "default", "high")
 _WALL_DENSITY_MULTIPLIER = {"low": 0.5, "default": 1.0, "high": 1.5}
 
-ENEMY_COUNT_LEVELS = ("low", "default", "high")
-_ENEMY_COUNT_DELTA = {"low": -1, "default": 0, "high": +2}
+ENEMY_COUNT_LEVELS = ("low", "default", "medium_plus", "high")
+_ENEMY_COUNT_DELTA = {"low": -1, "default": 0, "medium_plus": +1, "high": +2}
 
 
 def _resolve_enemy_count(preset_count: int, enemy_count: "int | str | None") -> int:

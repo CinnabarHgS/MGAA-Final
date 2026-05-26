@@ -72,15 +72,26 @@ ENEMY_PROFILES: dict[str, dict[str, str]] = {
         "medium": "low",
         "large": "low",
     },
+
     # Baseline size-scaled defaults from pcg.py.
     "normal": {
         "small": "default",
         "medium": "default",
         "large": "default",
     },
-    # Harder maps, but do not overcrowd small maps.
-    "heavy": {
+
+    # Targeted intermediate setting.
+    # This is mainly meant to test whether medium maps are better with
+    # one extra enemy, without also making large maps harder.
+    "medium_plus": {
         "small": "default",
+        "medium": "medium_plus",
+        "large": "default",
+    },
+
+    # Harder maps.
+    "heavy": {
+        "small": "high",
         "medium": "high",
         "large": "high",
     },
@@ -88,23 +99,22 @@ ENEMY_PROFILES: dict[str, dict[str, str]] = {
 
 
 ITEM_PROFILES: dict[str, dict[str, str]] = {
-    # Fewer resources. Large maps still keep some help.
-    "lean": {
-        "small": "none",
-        "medium": "none",
-        "large": "default",
+    # No no-item experiments: every profile keeps terrain/items in the game.
+    # The actual number of placed objects scales with map size inside pcg.py.
+    "few": {
+        "small": "few",
+        "medium": "few",
+        "large": "few",
     },
-    # Size-aware default: small maps need less help, large maps need more.
     "normal": {
-        "small": "none",
-        "medium": "default",
-        "large": "double",
+        "small": "normal",
+        "medium": "normal",
+        "large": "normal",
     },
-    # Resource-rich version for checking whether hard maps become fair.
-    "rich": {
-        "small": "default",
-        "medium": "double",
-        "large": "double",
+    "many": {
+        "small": "many",
+        "medium": "many",
+        "large": "many",
     },
 }
 
@@ -133,7 +143,7 @@ WALL_PROFILES: dict[str, dict[str, str]] = {
 DEFAULT_SCREEN_SIZES = ("small", "medium", "large")
 DEFAULT_SCREEN_MAP_TYPES = ("baseline", "random_walk", "arena")
 DEFAULT_SCREEN_ENEMY_PROFILES = ("light", "normal", "heavy")
-DEFAULT_SCREEN_ITEM_PROFILES = ("normal", "rich")
+DEFAULT_SCREEN_ITEM_PROFILES = ("few", "normal", "many")
 DEFAULT_SCREEN_WALL_PROFILES = ("open", "normal")
 DEFAULT_SCREEN_AGENTS = VALIDATION_AGENT_PROFILES
 
@@ -817,7 +827,7 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--size", choices=list(MAP_SIZES.keys()), default="medium")
     parser.add_argument("--map-type", choices=list(MAP_TYPES), default="random_walk")
-    parser.add_argument("--items", choices=list(ITEM_LEVELS), default="default")
+    parser.add_argument("--items", choices=list(ITEM_LEVELS), default="normal")
     parser.add_argument("--enemy-count", choices=list(ENEMY_COUNT_LEVELS), default="default")
     parser.add_argument("--wall-density", choices=list(WALL_DENSITY_LEVELS), default="default")
     parser.add_argument("--max-steps", type=int, default=120)
@@ -849,7 +859,7 @@ def parse_args() -> argparse.Namespace:
     )
     pilot.add_argument("--episodes", type=int, default=10)
     pilot.add_argument("--seed", type=int, default=11)
-    pilot.add_argument("--items", choices=list(ITEM_LEVELS), default="default")
+    pilot.add_argument("--items", choices=list(ITEM_LEVELS), default="normal")
     pilot.add_argument("--enemy-count", choices=list(ENEMY_COUNT_LEVELS), default="default")
     pilot.add_argument("--wall-density", choices=list(WALL_DENSITY_LEVELS), default="default")
     pilot.add_argument("--max-steps", type=int, default=120)
