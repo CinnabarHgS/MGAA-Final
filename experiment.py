@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import inspect
 import os
@@ -28,6 +29,12 @@ from grid_battle.pcg import (
     analyze_level,
     generate_preset_level,
 )
+
+import grid_battle.combat as combat_module
+import grid_battle.game as game_module
+import grid_battle.simulator as simulator_module
+import grid_battle.mcts as mcts_module
+from grid_battle.combat import CombatRules, UnitCombatProfile
 
 
 AGENT_PROFILES = (
@@ -147,6 +154,106 @@ DEFAULT_SCREEN_ITEM_PROFILES = ("few", "normal", "many")
 DEFAULT_SCREEN_WALL_PROFILES = ("open", "normal")
 DEFAULT_SCREEN_AGENTS = VALIDATION_AGENT_PROFILES
 
+BASE_COMBAT_RULES = combat_module.DEFAULT_COMBAT_RULES
+BASE_PLAYER_HP = BASE_COMBAT_RULES.player.max_health
+BASE_ENEMY_HP = BASE_COMBAT_RULES.enemy.max_health
+
+OFAT_FACTORS_DEFAULT = (
+    "size",
+    "map_type",
+    "enemy_profile",
+    "item_profile",
+    "wall_profile",
+    "player_hp",
+    "enemy_hp",
+)
+
+OFAT_BASELINE = {
+    "size": "medium",
+    "map_type": "baseline",
+    "enemy_profile": "medium_plus",
+    "item_profile": "many",
+    "wall_profile": "open",
+    "player_hp": BASE_PLAYER_HP,
+    "enemy_hp": BASE_ENEMY_HP,
+}
+
+OFAT_HEALTH_LEVELS = {
+    "player_hp": (3, 4, 5, 6),
+    "enemy_hp": (1, 2, 3),
+}
+
+
+FINAL_VALIDATION_PRESETS = (
+    # Small maps: intentionally easy/tutorial-like.
+    {
+        "size": "small",
+        "map_type": "baseline",
+        "enemy_profile": "normal",
+        "item_profile": "normal",
+        "wall_profile": "normal",
+    },
+    {
+        "size": "small",
+        "map_type": "random_walk",
+        "enemy_profile": "normal",
+        "item_profile": "normal",
+        "wall_profile": "normal",
+    },
+    {
+        "size": "small",
+        "map_type": "arena",
+        "enemy_profile": "normal",
+        "item_profile": "normal",
+        "wall_profile": "normal",
+    },
+
+    # Medium maps: tuned balanced setting.
+    {
+        "size": "medium",
+        "map_type": "baseline",
+        "enemy_profile": "medium_plus",
+        "item_profile": "many",
+        "wall_profile": "open",
+    },
+    {
+        "size": "medium",
+        "map_type": "random_walk",
+        "enemy_profile": "medium_plus",
+        "item_profile": "many",
+        "wall_profile": "open",
+    },
+    {
+        "size": "medium",
+        "map_type": "arena",
+        "enemy_profile": "medium_plus",
+        "item_profile": "many",
+        "wall_profile": "open",
+    },
+
+    # Large maps: hard, but not overloaded with heavy enemies.
+    {
+        "size": "large",
+        "map_type": "baseline",
+        "enemy_profile": "normal",
+        "item_profile": "many",
+        "wall_profile": "normal",
+    },
+    {
+        "size": "large",
+        "map_type": "random_walk",
+        "enemy_profile": "normal",
+        "item_profile": "many",
+        "wall_profile": "open",
+    },
+    {
+        "size": "large",
+        "map_type": "arena",
+        "enemy_profile": "normal",
+        "item_profile": "many",
+        "wall_profile": "open",
+    },
+)
 
 CSV_COLUMNS = [
     "engine",
@@ -162,6 +269,10 @@ CSV_COLUMNS = [
     "enemy_count_setting",
     "items",
     "wall_density",
+    "player_hp",
+    "enemy_hp",
+    "ofat_factor",
+    "ofat_value",
     "max_steps",
     "seed",
     "episode",
@@ -212,6 +323,10 @@ class ExperimentConfig:
     enemy_profile: str = ""
     item_profile: str = ""
     wall_profile: str = ""
+    player_hp: int = BASE_PLAYER_HP
+    enemy_hp: int = BASE_ENEMY_HP
+    ofat_factor: str = ""
+    ofat_value: str = ""
     workers: int = 1
 
 
@@ -281,6 +396,51 @@ def build_agent(name: str, seed: int) -> Agent:
         return build_mcts_agent(name, seed)
 
     raise ValueError(f"Unknown agent profile: {name}")
+
+
+
+@contextlib.contextmanager
+def temporary_combat_rules(player_hp: int, enemy_hp: int):
+    """Temporarily override combat rules for one evaluated episode.
+
+    This affects:
+    - GridBattleEnv player HP bookkeeping,
+    - Griddly enemy HP in the generated YAML,
+    - heuristic/MCTS combat profile lookups,
+    - MCTS simulator rollouts.
+
+    The context is process-local, so it is safe with ProcessPoolExecutor.
+    """
+
+    player_hp = max(1, int(player_hp))
+    enemy_hp = max(1, int(enemy_hp))
+
+    new_rules = CombatRules(
+        player=UnitCombatProfile(
+            max_health=player_hp,
+            attack_damage=BASE_COMBAT_RULES.player.attack_damage,
+            attack_range=BASE_COMBAT_RULES.player.attack_range,
+        ),
+        enemy=UnitCombatProfile(
+            max_health=enemy_hp,
+            attack_damage=BASE_COMBAT_RULES.enemy.attack_damage,
+            attack_range=BASE_COMBAT_RULES.enemy.attack_range,
+        ),
+    )
+
+    modules = [combat_module, game_module, simulator_module, mcts_module]
+    previous: list[tuple[object, CombatRules]] = []
+
+    for module in modules:
+        if hasattr(module, "DEFAULT_COMBAT_RULES"):
+            previous.append((module, getattr(module, "DEFAULT_COMBAT_RULES")))
+            setattr(module, "DEFAULT_COMBAT_RULES", new_rules)
+
+    try:
+        yield
+    finally:
+        for module, old_rules in previous:
+            setattr(module, "DEFAULT_COMBAT_RULES", old_rules)
 
 
 def run_episode(
@@ -354,28 +514,31 @@ def _run_episode_from_config(task: tuple[ExperimentConfig, int]) -> tuple[int, E
     map_seed = config.seed + episode_index
 
     # Fresh agent per episode: independent, parallel-safe, replayable.
-    agent = build_agent(config.agent, seed=map_seed)
+    # Combat rules are overridden for the whole episode so the real env,
+    # heuristic logic, and MCTS rollouts agree on player/enemy HP.
+    with temporary_combat_rules(config.player_hp, config.enemy_hp):
+        agent = build_agent(config.agent, seed=map_seed)
 
-    generated = generate_preset_level(
-        size=config.size,
-        map_type=config.map_type,
-        seed=map_seed,
-        item_level=config.items,
-        enemy_count=config.enemy_count,
-        wall_density=config.wall_density,
-    )
+        generated = generate_preset_level(
+            size=config.size,
+            map_type=config.map_type,
+            seed=map_seed,
+            item_level=config.items,
+            enemy_count=config.enemy_count,
+            wall_density=config.wall_density,
+        )
 
-    result = run_episode(
-        layout=generated.layout,
-        agent=agent,
-        max_steps=config.max_steps,
-        map_seed=map_seed,
-        map_width=generated.width,
-        map_height=generated.height,
-        generated_enemy_count=generated.enemy_count,
-        generated_obstacle_count=generated.obstacle_count,
-        generated_obstacle_density=generated.obstacle_density,
-    )
+        result = run_episode(
+            layout=generated.layout,
+            agent=agent,
+            max_steps=config.max_steps,
+            map_seed=map_seed,
+            map_width=generated.width,
+            map_height=generated.height,
+            generated_enemy_count=generated.enemy_count,
+            generated_obstacle_count=generated.obstacle_count,
+            generated_obstacle_density=generated.obstacle_density,
+        )
 
     return episode_index, result
 
@@ -414,6 +577,10 @@ def append_results_to_csv(
                     "enemy_count_setting": config.enemy_count,
                     "items": config.items,
                     "wall_density": config.wall_density,
+                    "player_hp": config.player_hp,
+                    "enemy_hp": config.enemy_hp,
+                    "ofat_factor": config.ofat_factor,
+                    "ofat_value": config.ofat_value,
                     "max_steps": config.max_steps,
                     "seed": config.seed,
                     "episode": episode_index,
@@ -813,6 +980,31 @@ def parse_csv_list(raw: str, valid: tuple[str, ...] | list[str], name: str) -> l
     return values
 
 
+def parse_int_csv_list(raw: str, name: str) -> list[int]:
+    values: list[int] = []
+
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+
+        try:
+            value = int(part)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid integer in {name}: {part!r}") from exc
+
+        if value < 1:
+            raise SystemExit(f"{name} values must be positive integers, got {value}")
+
+        values.append(value)
+
+    if not values:
+        raise SystemExit(f"{name} cannot be empty")
+
+    return values
+
+
+
 def add_worker_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--workers",
@@ -884,6 +1076,61 @@ def parse_args() -> argparse.Namespace:
     screen.add_argument("--wall-profiles", default=",".join(DEFAULT_SCREEN_WALL_PROFILES))
     screen.add_argument("--agents", default=",".join(DEFAULT_SCREEN_AGENTS))
     add_worker_arg(screen)
+
+
+    ofat = subparsers.add_parser(
+        "ofat",
+        help="Run a real-environment one-factor-at-a-time experiment.",
+    )
+    ofat.add_argument("--episodes", type=int, default=30)
+    ofat.add_argument("--seed", type=int, default=11)
+    ofat.add_argument("--max-steps", type=int, default=120)
+    ofat.add_argument("--csv-out", default="results/ofat_real.csv")
+    ofat.add_argument("--overwrite", action="store_true")
+    ofat.add_argument(
+        "--factors",
+        default=",".join(OFAT_FACTORS_DEFAULT),
+        help=(
+            "Comma-separated OFAT factors. Valid: "
+            "size,map_type,enemy_profile,item_profile,wall_profile,player_hp,enemy_hp"
+        ),
+    )
+    ofat.add_argument(
+        "--agents",
+        default=",".join(VALIDATION_AGENT_PROFILES),
+        help="Comma-separated agents to evaluate.",
+    )
+    ofat.add_argument("--baseline-size", choices=list(MAP_SIZES.keys()), default=OFAT_BASELINE["size"])
+    ofat.add_argument("--baseline-map-type", choices=list(MAP_TYPES), default=OFAT_BASELINE["map_type"])
+    ofat.add_argument("--baseline-enemy-profile", choices=list(ENEMY_PROFILES), default=OFAT_BASELINE["enemy_profile"])
+    ofat.add_argument("--baseline-item-profile", choices=list(ITEM_PROFILES), default=OFAT_BASELINE["item_profile"])
+    ofat.add_argument("--baseline-wall-profile", choices=list(WALL_PROFILES), default=OFAT_BASELINE["wall_profile"])
+    ofat.add_argument("--baseline-player-hp", type=int, default=OFAT_BASELINE["player_hp"])
+    ofat.add_argument("--baseline-enemy-hp", type=int, default=OFAT_BASELINE["enemy_hp"])
+    ofat.add_argument("--player-hp-levels", default=",".join(str(v) for v in OFAT_HEALTH_LEVELS["player_hp"]))
+    ofat.add_argument("--enemy-hp-levels", default=",".join(str(v) for v in OFAT_HEALTH_LEVELS["enemy_hp"]))
+    ofat.add_argument("--dry-run", action="store_true")
+    add_worker_arg(ofat)
+
+
+
+    final_validation = subparsers.add_parser(
+        "final-validation",
+        help="Run the final selected PCG defaults across all sizes, map types, and validation agents.",
+    )
+    final_validation.add_argument("--episodes", type=int, default=50)
+    final_validation.add_argument("--seed", type=int, default=11)
+    final_validation.add_argument("--max-steps", type=int, default=120)
+    final_validation.add_argument("--csv-out", default="results/final_validation.csv")
+    final_validation.add_argument("--overwrite", action="store_true")
+    final_validation.add_argument("--dry-run", action="store_true")
+    final_validation.add_argument(
+        "--agents",
+        default=",".join(VALIDATION_AGENT_PROFILES),
+        help="Comma-separated agents to evaluate.",
+    )
+    add_worker_arg(final_validation)
+
 
     replay = subparsers.add_parser(
         "replay",
@@ -1104,6 +1351,280 @@ def run_pcg_screen(args: argparse.Namespace) -> None:
     print(f"Done. Results written to {csv_out}")
 
 
+
+def run_ofat(args: argparse.Namespace) -> None:
+    valid_factors = list(OFAT_FACTORS_DEFAULT)
+    factors = parse_csv_list(args.factors, valid_factors, "factors")
+    agents = parse_csv_list(args.agents, list(AGENT_PROFILES), "agents")
+
+    player_hp_levels = parse_int_csv_list(args.player_hp_levels, "player-hp-levels")
+    enemy_hp_levels = parse_int_csv_list(args.enemy_hp_levels, "enemy-hp-levels")
+
+    factor_levels: dict[str, list[object]] = {
+        "size": list(MAP_SIZES.keys()),
+        "map_type": list(MAP_TYPES),
+        "enemy_profile": list(ENEMY_PROFILES.keys()),
+        "item_profile": list(ITEM_PROFILES.keys()),
+        "wall_profile": list(WALL_PROFILES.keys()),
+        "player_hp": player_hp_levels,
+        "enemy_hp": enemy_hp_levels,
+    }
+
+    baseline: dict[str, object] = {
+        "size": args.baseline_size,
+        "map_type": args.baseline_map_type,
+        "enemy_profile": args.baseline_enemy_profile,
+        "item_profile": args.baseline_item_profile,
+        "wall_profile": args.baseline_wall_profile,
+        "player_hp": args.baseline_player_hp,
+        "enemy_hp": args.baseline_enemy_hp,
+    }
+
+    cells: list[ExperimentConfig] = []
+
+    def add_cell(params: dict[str, object], factor: str, value: object, agent_name: str) -> None:
+        size = str(params["size"])
+        map_type = str(params["map_type"])
+        enemy_profile = str(params["enemy_profile"])
+        item_profile = str(params["item_profile"])
+        wall_profile = str(params["wall_profile"])
+        player_hp = int(params["player_hp"])
+        enemy_hp = int(params["enemy_hp"])
+
+        enemy_count = ENEMY_PROFILES[enemy_profile][size]
+        items = ITEM_PROFILES[item_profile][size]
+        wall_density = WALL_PROFILES[wall_profile][map_type]
+
+        canonical_agent = canonical_agent_name(agent_name)
+
+        cell_id = (
+            f"ofat:"
+            f"factor={factor}:value={value}:"
+            f"size={size}:map_type={map_type}:"
+            f"enemy_profile={enemy_profile}:item_profile={item_profile}:"
+            f"wall_profile={wall_profile}:"
+            f"player_hp={player_hp}:enemy_hp={enemy_hp}:"
+            f"agent={canonical_agent}"
+        )
+
+        cells.append(
+            ExperimentConfig(
+                agent=canonical_agent,
+                episodes=args.episodes,
+                seed=args.seed,
+                size=size,
+                map_type=map_type,
+                items=items,
+                enemy_count=enemy_count,
+                wall_density=wall_density,
+                max_steps=args.max_steps,
+                csv_out=args.csv_out,
+                quiet=True,
+                experiment_name="ofat_real",
+                cell_id=cell_id,
+                enemy_profile=enemy_profile,
+                item_profile=item_profile,
+                wall_profile=wall_profile,
+                player_hp=player_hp,
+                enemy_hp=enemy_hp,
+                ofat_factor=factor,
+                ofat_value=str(value),
+                workers=getattr(args, "workers", 1),
+            )
+        )
+
+    # One explicit baseline cell.
+    for agent_name in agents:
+        add_cell(dict(baseline), "baseline", "baseline", agent_name)
+
+    # One-factor-at-a-time cells. Skip baseline value for each factor because
+    # the baseline is already included once.
+    for factor in factors:
+        baseline_value = baseline[factor]
+
+        for value in factor_levels[factor]:
+            if str(value) == str(baseline_value):
+                continue
+
+            params = dict(baseline)
+            params[factor] = value
+
+            for agent_name in agents:
+                add_cell(params, factor, value, agent_name)
+
+    total_episodes = len(cells) * args.episodes
+
+    print("Running real-environment OFAT experiment.")
+    print("Engine: Griddly-backed GridBattleEnv")
+    print("Design: one factor at a time around a tuned medium-map baseline")
+    print(f"Cells: {len(cells)}")
+    print(f"Episodes per cell: {args.episodes}")
+    print(f"Total episodes: {total_episodes}")
+    print(f"Workers per cell: {args.workers}")
+    print(f"CSV output: {args.csv_out}")
+    print()
+    print(f"Factors: {factors}")
+    print(f"Agents: {[canonical_agent_name(agent) for agent in agents]}")
+    print(f"Baseline: {baseline}")
+    print()
+
+    if args.dry_run:
+        print("Dry run only. First 30 cells:")
+        for config in cells[:30]:
+            print(
+                f"{config.cell_id} -> "
+                f"enemy_count={config.enemy_count}, "
+                f"items={config.items}, "
+                f"wall_density={config.wall_density}, "
+                f"player_hp={config.player_hp}, "
+                f"enemy_hp={config.enemy_hp}"
+            )
+        if len(cells) > 30:
+            print(f"... {len(cells) - 30} more cells")
+        return
+
+    if args.overwrite and os.path.exists(args.csv_out):
+        os.remove(args.csv_out)
+
+    print(
+        " factor       | value        | agent       | size   | map_type    | enemy | item | wall | hp      | winrate | turns | dmg"
+    )
+    print("-" * 128)
+
+    for index, config in enumerate(cells, start=1):
+        results = run_evaluation(config)
+        wr = win_rate(results)
+        avg_turns = mean(result.turns for result in results)
+        avg_damage = mean(result.damage_taken for result in results)
+
+        print(
+            f"[{index:>3}/{len(cells)}] "
+            f"{config.ofat_factor:<12} | "
+            f"{config.ofat_value:<12} | "
+            f"{config.agent:<11} | "
+            f"{config.size:<6} | "
+            f"{config.map_type:<11} | "
+            f"{config.enemy_profile:<6} | "
+            f"{config.item_profile:<4} | "
+            f"{config.wall_profile:<4} | "
+            f"P{config.player_hp}/E{config.enemy_hp:<3} | "
+            f"WR {wr:>6.1%} | "
+            f"{avg_turns:>5.1f} | "
+            f"{avg_damage:>4.1f}"
+        )
+
+    print()
+    print(f"Done. Results written to {args.csv_out}")
+
+
+
+def run_final_validation(args: argparse.Namespace) -> None:
+    agents = parse_csv_list(args.agents, list(AGENT_PROFILES), "agents")
+    csv_out = args.csv_out
+
+    cells: list[ExperimentConfig] = []
+
+    for preset in FINAL_VALIDATION_PRESETS:
+        size = preset["size"]
+        map_type = preset["map_type"]
+        enemy_profile = preset["enemy_profile"]
+        item_profile = preset["item_profile"]
+        wall_profile = preset["wall_profile"]
+
+        enemy_count = ENEMY_PROFILES[enemy_profile][size]
+        items = ITEM_PROFILES[item_profile][size]
+        wall_density = WALL_PROFILES[wall_profile][map_type]
+
+        for agent_name in agents:
+            canonical_agent = canonical_agent_name(agent_name)
+
+            cell_id = (
+                f"final_validation:"
+                f"size={size}:map_type={map_type}:"
+                f"enemy_profile={enemy_profile}:item_profile={item_profile}:"
+                f"wall_profile={wall_profile}:agent={canonical_agent}"
+            )
+
+            cells.append(
+                ExperimentConfig(
+                    agent=canonical_agent,
+                    episodes=args.episodes,
+                    seed=args.seed,
+                    size=size,
+                    map_type=map_type,
+                    items=items,
+                    enemy_count=enemy_count,
+                    wall_density=wall_density,
+                    max_steps=args.max_steps,
+                    csv_out=csv_out,
+                    quiet=True,
+                    experiment_name="final_validation",
+                    cell_id=cell_id,
+                    enemy_profile=enemy_profile,
+                    item_profile=item_profile,
+                    wall_profile=wall_profile,
+                    player_hp=BASE_PLAYER_HP,
+                    enemy_hp=BASE_ENEMY_HP,
+                    workers=getattr(args, "workers", 1),
+                )
+            )
+
+    total_episodes = len(cells) * args.episodes
+
+    print("Running final validation experiment.")
+    print("Engine: Griddly-backed GridBattleEnv")
+    print("Design: selected final PCG defaults across size x map_type x validation agents")
+    print(f"Cells: {len(cells)}")
+    print(f"Episodes per cell: {args.episodes}")
+    print(f"Total episodes: {total_episodes}")
+    print(f"Workers per cell: {args.workers}")
+    print(f"CSV output: {csv_out}")
+    print()
+    print("Selected defaults:")
+    for preset in FINAL_VALIDATION_PRESETS:
+        print(
+            "  "
+            f"size={preset['size']}, "
+            f"map_type={preset['map_type']}, "
+            f"enemy_profile={preset['enemy_profile']}, "
+            f"item_profile={preset['item_profile']}, "
+            f"wall_profile={preset['wall_profile']}"
+        )
+    print()
+    print(f"Agents: {[canonical_agent_name(agent) for agent in agents]}")
+    print()
+
+    if args.dry_run:
+        print("Dry run only. Cells:")
+        for config in cells:
+            print(
+                f"{config.cell_id} -> "
+                f"enemy_count={config.enemy_count}, "
+                f"items={config.items}, "
+                f"wall_density={config.wall_density}, "
+                f"player_hp={config.player_hp}, "
+                f"enemy_hp={config.enemy_hp}"
+            )
+        return
+
+    if args.overwrite and os.path.exists(csv_out):
+        os.remove(csv_out)
+
+    print(
+        "  size |    map_type | enemy |  item |   wall | agent                        | "
+        "winrate | turns |  dmg | choke"
+    )
+    print("-" * 122)
+
+    for index, config in enumerate(cells, start=1):
+        results = run_evaluation(config)
+        print(f"[{index:>3}/{len(cells)}] ", end="")
+        print_compact_result(config, results)
+
+    print()
+    print(f"Done. Results written to {csv_out}")
+
+
 def main() -> None:
     args = parse_args()
 
@@ -1115,6 +1636,10 @@ def main() -> None:
         run_balance_pilot(args)
     elif args.command == "pcg-screen":
         run_pcg_screen(args)
+    elif args.command == "ofat":
+        run_ofat(args)
+    elif args.command == "final-validation":
+        run_final_validation(args)
     elif args.command == "replay":
         run_replay(args)
     else:
