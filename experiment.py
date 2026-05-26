@@ -5,6 +5,7 @@ import csv
 import inspect
 import os
 import random as py_random
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
@@ -118,6 +119,7 @@ class ExperimentConfig:
     quiet: bool = False
     swept_variable: str = ""
     swept_value: str = ""
+    workers: int = 1
 
 
 @dataclass(frozen=True)
@@ -149,7 +151,6 @@ def mcts_profile_for(agent_name: str) -> MctsProfile | None:
 
 def build_mcts_agent(profile_name: str, seed: int) -> MctsAgent:
     profile = MCTS_PROFILES[profile_name]
-
     signature = inspect.signature(MctsAgent)
     supported = signature.parameters
 
@@ -193,7 +194,7 @@ def run_episode(
 ) -> EpisodeResult:
     analysis = analyze_level(layout)
 
-    # The real environment contains stochastic mechanics, e.g. bush dodge.
+    # The real environment has stochastic mechanics, e.g. bush dodge.
     # Seed them per episode so evaluation and replay are reproducible.
     py_random.seed(map_seed)
 
@@ -243,6 +244,37 @@ def run_episode(
         close = getattr(env, "close", None)
         if callable(close):
             close()
+
+
+def _run_episode_from_config(task: tuple[ExperimentConfig, int]) -> tuple[int, EpisodeResult]:
+    config, episode_index = task
+    map_seed = config.seed + episode_index
+
+    # Fresh agent per episode: independent, parallel-safe, replayable.
+    agent = build_agent(config.agent, seed=map_seed)
+
+    generated = generate_preset_level(
+        size=config.size,
+        map_type=config.map_type,
+        seed=map_seed,
+        item_level=config.items,
+        enemy_count=config.enemy_count,
+        wall_density=config.wall_density,
+    )
+
+    result = run_episode(
+        layout=generated.layout,
+        agent=agent,
+        max_steps=config.max_steps,
+        map_seed=map_seed,
+        map_width=generated.width,
+        map_height=generated.height,
+        generated_enemy_count=generated.enemy_count,
+        generated_obstacle_count=generated.obstacle_count,
+        generated_obstacle_density=generated.obstacle_density,
+    )
+
+    return episode_index, result
 
 
 def append_results_to_csv(
@@ -304,38 +336,17 @@ def append_results_to_csv(
 
 
 def run_evaluation(config: ExperimentConfig) -> list[EpisodeResult]:
-    results: list[EpisodeResult] = []
+    workers = max(1, int(config.workers))
+    tasks = [(config, episode_index) for episode_index in range(config.episodes)]
 
-    for episode_index in range(config.episodes):
-        map_seed = config.seed + episode_index
+    if workers == 1 or config.episodes == 1:
+        indexed_results = [_run_episode_from_config(task) for task in tasks]
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            indexed_results = list(executor.map(_run_episode_from_config, tasks))
 
-        # Build a fresh agent per episode.
-        # This makes every episode independent and makes replay reproducible:
-        # replay uses the same map_seed as the agent seed.
-        agent = build_agent(config.agent, seed=map_seed)
-
-        generated = generate_preset_level(
-            size=config.size,
-            map_type=config.map_type,
-            seed=map_seed,
-            item_level=config.items,
-            enemy_count=config.enemy_count,
-            wall_density=config.wall_density,
-        )
-
-        result = run_episode(
-            layout=generated.layout,
-            agent=agent,
-            max_steps=config.max_steps,
-            map_seed=map_seed,
-            map_width=generated.width,
-            map_height=generated.height,
-            generated_enemy_count=generated.enemy_count,
-            generated_obstacle_count=generated.obstacle_count,
-            generated_obstacle_density=generated.obstacle_density,
-        )
-
-        results.append(result)
+    indexed_results.sort(key=lambda item: item[0])
+    results = [result for _episode_index, result in indexed_results]
 
     if config.csv_out:
         append_results_to_csv(config.csv_out, config, results)
@@ -361,10 +372,13 @@ def print_summary(config: ExperimentConfig, results: list[EpisodeResult]) -> Non
     print("Real-environment evaluation summary")
     print("Engine: Griddly-backed GridBattleEnv")
     print(f"Agent: {config.agent}")
+
     if profile:
         print(f"MCTS iterations: {profile.iterations}")
         print(f"MCTS rollout depth: {profile.rollout_depth}")
+
     print(f"Episodes: {config.episodes}")
+    print(f"Workers: {config.workers}")
     print(f"Map type: {config.map_type}")
     print(f"Map size preset: {config.size}")
     print(
@@ -392,6 +406,7 @@ def print_summary(config: ExperimentConfig, results: list[EpisodeResult]) -> Non
 def print_compact_result(config: ExperimentConfig, results: list[EpisodeResult]) -> None:
     profile = mcts_profile_for(config.agent)
     profile_note = ""
+
     if profile:
         profile_note = f" ({profile.iterations} it, depth {profile.rollout_depth})"
 
@@ -405,7 +420,6 @@ def print_compact_result(config: ExperimentConfig, results: list[EpisodeResult])
         f"choke {mean(result.chokepoint_count for result in results):>4.1f} | "
         f"reach {mean(result.reachable_floor_fraction for result in results):>6.1%}"
     )
-
 
 
 def direction_name(direction: int | None) -> str:
@@ -551,8 +565,7 @@ def run_replay(args: argparse.Namespace) -> None:
 
     analysis = analyze_level(generated.layout)
 
-    # Must match run_evaluation(): one fresh agent per episode, seeded by map_seed.
-    # Also seed real-environment randomness so bush dodge etc. are repeatable.
+    # Match run_evaluation: fresh agent per episode, seeded by map_seed.
     py_random.seed(map_seed)
     agent = build_agent(args.agent, seed=map_seed)
 
@@ -636,14 +649,12 @@ def run_replay(args: argparse.Namespace) -> None:
         print(output)
 
 
-
 def run_replay_ui(args: argparse.Namespace, layout: str, generated, analysis, agent: Agent, map_seed: int) -> None:
     from grid_battle.ui_pygame import GridBattleWindow
 
     def make_agent() -> Agent:
         return build_agent(args.agent, seed=map_seed)
 
-    # Seed once before the initial UI environment is created.
     py_random.seed(map_seed)
 
     env = GridBattleEnv(layout, max_steps=args.max_steps)
@@ -678,6 +689,19 @@ def run_replay_ui(args: argparse.Namespace, layout: str, generated, analysis, ag
 
     window.run()
 
+
+def add_worker_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of worker processes for parallel episode evaluation. "
+            "Use 1 for sequential execution."
+        ),
+    )
+
+
 def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--seed", type=int, default=11)
@@ -703,6 +727,7 @@ def parse_args() -> argparse.Namespace:
     smoke.add_argument("--episodes", type=int, default=2)
     smoke.add_argument("--seed", type=int, default=11)
     smoke.add_argument("--max-steps", type=int, default=60)
+    add_worker_arg(smoke)
 
     eval_parser = subparsers.add_parser(
         "eval",
@@ -712,6 +737,7 @@ def parse_args() -> argparse.Namespace:
     eval_parser.add_argument("--agent", choices=AGENT_PROFILES, default="heuristic")
     eval_parser.add_argument("--csv-out", default=None)
     eval_parser.add_argument("--quiet", action="store_true")
+    add_worker_arg(eval_parser)
 
     pilot = subparsers.add_parser(
         "balance-pilot",
@@ -725,11 +751,11 @@ def parse_args() -> argparse.Namespace:
     pilot.add_argument("--max-steps", type=int, default=120)
     pilot.add_argument("--csv-out", default="results/balance_pilot.csv")
     pilot.add_argument("--overwrite", action="store_true")
-
+    add_worker_arg(pilot)
 
     replay = subparsers.add_parser(
         "replay",
-        help="Inspect one generated game as text or with a simple autoplay UI.",
+        help="Inspect one generated game as text or with the normal Pygame UI.",
     )
     add_common_eval_args(replay)
     replay.add_argument("--agent", choices=AGENT_PROFILES, default="heuristic")
@@ -752,7 +778,7 @@ def parse_args() -> argparse.Namespace:
     replay.add_argument(
         "--ui",
         action="store_true",
-        help="Show a simple Pygame autoplay replay viewer.",
+        help="Show the existing Pygame UI as an autoplay replay viewer.",
     )
     replay.add_argument(
         "--delay-ms",
@@ -783,6 +809,7 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         max_steps=args.max_steps,
         csv_out=args.csv_out,
         quiet=args.quiet,
+        workers=getattr(args, "workers", 1),
     )
 
 
@@ -804,6 +831,7 @@ def run_smoke(args: argparse.Namespace) -> None:
             enemy_count="default",
             wall_density="default",
             max_steps=args.max_steps,
+            workers=getattr(args, "workers", 1),
         )
         run_evaluation(config)
         print()
@@ -819,6 +847,7 @@ def run_balance_pilot(args: argparse.Namespace) -> None:
     print("Engine: Griddly-backed GridBattleEnv")
     print("Design: size x map_type x skill ladder")
     print(f"Episodes per cell: {args.episodes}")
+    print(f"Workers per cell: {args.workers}")
     print(f"CSV output: {csv_out}")
     print()
     print(
@@ -849,6 +878,7 @@ def run_balance_pilot(args: argparse.Namespace) -> None:
             quiet=True,
             swept_variable="balance_pilot",
             swept_value=f"{size}:{map_type}:{agent_name}",
+            workers=getattr(args, "workers", 1),
         )
 
         results = run_evaluation(config)
