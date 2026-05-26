@@ -550,6 +550,8 @@ class GridBattleWindow:
         agent_name: str | None = None,
         agent_delay_ms: int = 600,
         agent_start_paused: bool = True,
+        agent_factory: object | None = None,
+        replay_seed: int | None = None,
     ):
         pygame.init()
         pygame.font.init()
@@ -563,6 +565,8 @@ class GridBattleWindow:
         self.agent_name = agent_name or (agent.__class__.__name__ if agent is not None else "")
         self.agent_delay_ms = max(1, agent_delay_ms)
         self.agent_replay_paused = agent_start_paused
+        self.agent_factory = agent_factory
+        self.replay_seed = replay_seed
         self.agent_last_step_at = pygame.time.get_ticks()
         self.agent_last_action_summary = "No agent action taken yet."
         self.margin = 24
@@ -648,12 +652,26 @@ class GridBattleWindow:
             return
 
         if key == pygame.K_r:
-            self._reset()
-            self.agent_last_step_at = pygame.time.get_ticks()
-            self.agent_last_action_summary = "Replay reset."
-            state = "paused" if self.agent_replay_paused else "running"
-            self.status_message = f"Agent replay reset. Replay is {state}."
+            self._reset_agent_replay()
             return
+
+    def _reset_agent_replay(self) -> None:
+        if self.replay_seed is not None:
+            import random as _random
+            _random.seed(self.replay_seed)
+
+        if self.agent_factory is not None:
+            self.agent = self.agent_factory()
+
+        self._reset()
+        self.agent_last_step_at = pygame.time.get_ticks()
+        self.agent_last_action_summary = "Replay reset."
+
+        state = "paused" if self.agent_replay_paused else "running"
+        self.status_message = (
+            f"Agent replay reset with seed {self.replay_seed}. "
+            f"Replay is {state}."
+        )
 
     def _maybe_step_agent_replay(self) -> None:
         if self.agent is None:

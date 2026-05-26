@@ -4,6 +4,7 @@ import argparse
 import csv
 import inspect
 import os
+import random as py_random
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
@@ -192,6 +193,10 @@ def run_episode(
 ) -> EpisodeResult:
     analysis = analyze_level(layout)
 
+    # The real environment contains stochastic mechanics, e.g. bush dodge.
+    # Seed them per episode so evaluation and replay are reproducible.
+    py_random.seed(map_seed)
+
     env = GridBattleEnv(layout, max_steps=max_steps)
 
     try:
@@ -299,11 +304,15 @@ def append_results_to_csv(
 
 
 def run_evaluation(config: ExperimentConfig) -> list[EpisodeResult]:
-    agent = build_agent(config.agent, seed=config.seed)
     results: list[EpisodeResult] = []
 
     for episode_index in range(config.episodes):
         map_seed = config.seed + episode_index
+
+        # Build a fresh agent per episode.
+        # This makes every episode independent and makes replay reproducible:
+        # replay uses the same map_seed as the agent seed.
+        agent = build_agent(config.agent, seed=map_seed)
 
         generated = generate_preset_level(
             size=config.size,
@@ -541,7 +550,11 @@ def run_replay(args: argparse.Namespace) -> None:
     )
 
     analysis = analyze_level(generated.layout)
-    agent = build_agent(args.agent, seed=args.seed)
+
+    # Must match run_evaluation(): one fresh agent per episode, seeded by map_seed.
+    # Also seed real-environment randomness so bush dodge etc. are repeatable.
+    py_random.seed(map_seed)
+    agent = build_agent(args.agent, seed=map_seed)
 
     if args.ui:
         run_replay_ui(args, generated.layout, generated, analysis, agent, map_seed)
@@ -627,6 +640,12 @@ def run_replay(args: argparse.Namespace) -> None:
 def run_replay_ui(args: argparse.Namespace, layout: str, generated, analysis, agent: Agent, map_seed: int) -> None:
     from grid_battle.ui_pygame import GridBattleWindow
 
+    def make_agent() -> Agent:
+        return build_agent(args.agent, seed=map_seed)
+
+    # Seed once before the initial UI environment is created.
+    py_random.seed(map_seed)
+
     env = GridBattleEnv(layout, max_steps=args.max_steps)
 
     window = GridBattleWindow(
@@ -637,10 +656,12 @@ def run_replay_ui(args: argparse.Namespace, layout: str, generated, analysis, ag
             f"{args.size}/{args.map_type} - seed {map_seed}"
         ),
         tile_size=args.tile_size,
-        agent=agent,
+        agent=make_agent(),
         agent_name=args.agent,
         agent_delay_ms=args.delay_ms,
         agent_start_paused=args.pause,
+        agent_factory=make_agent,
+        replay_seed=map_seed,
     )
 
     window.last_turn_summary = (
