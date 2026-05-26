@@ -33,17 +33,17 @@ from grid_battle.pcg import (
 AGENT_PROFILES = (
     "random",
     "heuristic",
-    "mcts_weak",
+    "mcts_small",
     "mcts_medium",
     "mcts_strong",
+    "mcts_weak",  # backwards-compatible alias for mcts_small
 )
 
-BALANCE_AGENT_PROFILES = (
+VALIDATION_AGENT_PROFILES = (
     "random",
     "heuristic",
-    "mcts_weak",
+    "mcts_small",
     "mcts_medium",
-    "mcts_strong",
 )
 
 
@@ -55,10 +55,87 @@ class MctsProfile:
 
 
 MCTS_PROFILES: dict[str, MctsProfile] = {
+    "mcts_small": MctsProfile(iterations=50, rollout_depth=10),
     "mcts_weak": MctsProfile(iterations=50, rollout_depth=10),
     "mcts_medium": MctsProfile(iterations=200, rollout_depth=30),
     "mcts_strong": MctsProfile(iterations=800, rollout_depth=40),
 }
+
+
+# These profiles are deliberately not just raw low/default/high switches.
+# They encode the idea that the same raw parameter can mean different things
+# on different map sizes.
+ENEMY_PROFILES: dict[str, dict[str, str]] = {
+    # Easier maps: fewer enemies than the size default.
+    "light": {
+        "small": "low",
+        "medium": "low",
+        "large": "low",
+    },
+    # Baseline size-scaled defaults from pcg.py.
+    "normal": {
+        "small": "default",
+        "medium": "default",
+        "large": "default",
+    },
+    # Harder maps, but do not overcrowd small maps.
+    "heavy": {
+        "small": "default",
+        "medium": "high",
+        "large": "high",
+    },
+}
+
+
+ITEM_PROFILES: dict[str, dict[str, str]] = {
+    # Fewer resources. Large maps still keep some help.
+    "lean": {
+        "small": "none",
+        "medium": "none",
+        "large": "default",
+    },
+    # Size-aware default: small maps need less help, large maps need more.
+    "normal": {
+        "small": "none",
+        "medium": "default",
+        "large": "double",
+    },
+    # Resource-rich version for checking whether hard maps become fair.
+    "rich": {
+        "small": "default",
+        "medium": "double",
+        "large": "double",
+    },
+}
+
+
+# These are map-type-aware. Arena should remain relatively open, random_walk
+# should remain cave-like, and baseline can vary more freely.
+WALL_PROFILES: dict[str, dict[str, str]] = {
+    "open": {
+        "baseline": "low",
+        "random_walk": "low",
+        "arena": "low",
+    },
+    "normal": {
+        "baseline": "default",
+        "random_walk": "default",
+        "arena": "default",
+    },
+    "tight": {
+        "baseline": "high",
+        "random_walk": "default",
+        "arena": "default",
+    },
+}
+
+
+DEFAULT_SCREEN_SIZES = ("small", "medium", "large")
+DEFAULT_SCREEN_MAP_TYPES = ("baseline", "random_walk", "arena")
+DEFAULT_SCREEN_ENEMY_PROFILES = ("light", "normal", "heavy")
+DEFAULT_SCREEN_ITEM_PROFILES = ("normal", "rich")
+DEFAULT_SCREEN_WALL_PROFILES = ("open", "normal")
+DEFAULT_SCREEN_AGENTS = VALIDATION_AGENT_PROFILES
 
 
 CSV_COLUMNS = [
@@ -69,15 +146,18 @@ CSV_COLUMNS = [
     "mcts_exploration",
     "size",
     "map_type",
-    "items",
+    "enemy_profile",
+    "item_profile",
+    "wall_profile",
     "enemy_count_setting",
+    "items",
     "wall_density",
     "max_steps",
     "seed",
     "episode",
     "map_seed",
-    "swept_variable",
-    "swept_value",
+    "experiment_name",
+    "cell_id",
     "won",
     "turns",
     "damage_taken",
@@ -117,8 +197,11 @@ class ExperimentConfig:
     max_steps: int
     csv_out: str | None = None
     quiet: bool = False
-    swept_variable: str = ""
-    swept_value: str = ""
+    experiment_name: str = ""
+    cell_id: str = ""
+    enemy_profile: str = ""
+    item_profile: str = ""
+    wall_profile: str = ""
     workers: int = 1
 
 
@@ -149,8 +232,16 @@ def mcts_profile_for(agent_name: str) -> MctsProfile | None:
     return MCTS_PROFILES.get(agent_name)
 
 
+def canonical_agent_name(agent_name: str) -> str:
+    if agent_name == "mcts_weak":
+        return "mcts_small"
+    return agent_name
+
+
 def build_mcts_agent(profile_name: str, seed: int) -> MctsAgent:
+    profile_name = canonical_agent_name(profile_name)
     profile = MCTS_PROFILES[profile_name]
+
     signature = inspect.signature(MctsAgent)
     supported = signature.parameters
 
@@ -168,6 +259,8 @@ def build_mcts_agent(profile_name: str, seed: int) -> MctsAgent:
 
 
 def build_agent(name: str, seed: int) -> Agent:
+    name = canonical_agent_name(name)
+
     if name == "random":
         return RandomAgent(seed=seed)
 
@@ -286,7 +379,8 @@ def append_results_to_csv(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     file_exists = path.exists() and path.stat().st_size > 0
-    profile = mcts_profile_for(config.agent)
+    profile = mcts_profile_for(canonical_agent_name(config.agent))
+    agent_name = canonical_agent_name(config.agent)
 
     with path.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
@@ -298,21 +392,24 @@ def append_results_to_csv(
             writer.writerow(
                 {
                     "engine": "griddly",
-                    "agent": config.agent,
+                    "agent": agent_name,
                     "mcts_iterations": profile.iterations if profile else "",
                     "mcts_rollout_depth": profile.rollout_depth if profile else "",
                     "mcts_exploration": profile.exploration if profile else "",
                     "size": config.size,
                     "map_type": config.map_type,
-                    "items": config.items,
+                    "enemy_profile": config.enemy_profile,
+                    "item_profile": config.item_profile,
+                    "wall_profile": config.wall_profile,
                     "enemy_count_setting": config.enemy_count,
+                    "items": config.items,
                     "wall_density": config.wall_density,
                     "max_steps": config.max_steps,
                     "seed": config.seed,
                     "episode": episode_index,
                     "map_seed": result.map_seed,
-                    "swept_variable": config.swept_variable,
-                    "swept_value": config.swept_value,
+                    "experiment_name": config.experiment_name,
+                    "cell_id": config.cell_id,
                     "won": int(result.won),
                     "turns": result.turns,
                     "damage_taken": result.damage_taken,
@@ -367,11 +464,11 @@ def avg_or_zero(values: list[float | int]) -> float:
 
 def print_summary(config: ExperimentConfig, results: list[EpisodeResult]) -> None:
     losses = [result for result in results if not result.won]
-    profile = mcts_profile_for(config.agent)
+    profile = mcts_profile_for(canonical_agent_name(config.agent))
 
     print("Real-environment evaluation summary")
     print("Engine: Griddly-backed GridBattleEnv")
-    print(f"Agent: {config.agent}")
+    print(f"Agent: {canonical_agent_name(config.agent)}")
 
     if profile:
         print(f"MCTS iterations: {profile.iterations}")
@@ -387,6 +484,13 @@ def print_summary(config: ExperimentConfig, results: list[EpisodeResult]) -> Non
         f"enemy_count={config.enemy_count}, "
         f"wall_density={config.wall_density}"
     )
+    if config.enemy_profile or config.item_profile or config.wall_profile:
+        print(
+            "PCG profiles: "
+            f"enemy_profile={config.enemy_profile or '-'}, "
+            f"item_profile={config.item_profile or '-'}, "
+            f"wall_profile={config.wall_profile or '-'}"
+        )
     print(f"Max steps: {config.max_steps}")
     print(f"Win rate: {win_rate(results):.1%}")
     print(f"Average turns: {mean(result.turns for result in results):.2f}")
@@ -404,7 +508,8 @@ def print_summary(config: ExperimentConfig, results: list[EpisodeResult]) -> Non
 
 
 def print_compact_result(config: ExperimentConfig, results: list[EpisodeResult]) -> None:
-    profile = mcts_profile_for(config.agent)
+    agent_name = canonical_agent_name(config.agent)
+    profile = mcts_profile_for(agent_name)
     profile_note = ""
 
     if profile:
@@ -413,22 +518,19 @@ def print_compact_result(config: ExperimentConfig, results: list[EpisodeResult])
     print(
         f"{config.size:>6} | "
         f"{config.map_type:>11} | "
-        f"{config.agent:<12}{profile_note:<18} | "
+        f"{config.enemy_profile or '-':>6} | "
+        f"{config.item_profile or '-':>6} | "
+        f"{config.wall_profile or '-':>6} | "
+        f"{agent_name:<11}{profile_note:<18} | "
         f"WR {win_rate(results):>6.1%} | "
         f"turns {mean(result.turns for result in results):>5.1f} | "
         f"dmg {mean(result.damage_taken for result in results):>4.1f} | "
-        f"choke {mean(result.chokepoint_count for result in results):>4.1f} | "
-        f"reach {mean(result.reachable_floor_fraction for result in results):>6.1%}"
+        f"choke {mean(result.chokepoint_count for result in results):>4.1f}"
     )
 
 
 def direction_name(direction: int | None) -> str:
-    names = {
-        1: "up",
-        2: "right",
-        3: "down",
-        4: "left",
-    }
+    names = {1: "up", 2: "right", 3: "down", 4: "left"}
     if direction is None:
         return "none"
     return names.get(direction, str(direction))
@@ -520,7 +622,7 @@ def replay_header(args: argparse.Namespace, map_seed: int, generated, analysis) 
         [
             "Replay",
             "Engine: Griddly-backed GridBattleEnv",
-            f"Agent: {args.agent}",
+            f"Agent: {canonical_agent_name(args.agent)}",
             f"Size: {args.size}",
             f"Map type: {args.map_type}",
             f"Episode: {args.episode}",
@@ -565,7 +667,6 @@ def run_replay(args: argparse.Namespace) -> None:
 
     analysis = analyze_level(generated.layout)
 
-    # Match run_evaluation: fresh agent per episode, seeded by map_seed.
     py_random.seed(map_seed)
     agent = build_agent(args.agent, seed=map_seed)
 
@@ -574,7 +675,6 @@ def run_replay(args: argparse.Namespace) -> None:
         return
 
     log_lines: list[str] = [replay_header(args, map_seed, generated, analysis)]
-
     env = GridBattleEnv(generated.layout, max_steps=args.max_steps)
 
     try:
@@ -663,12 +763,12 @@ def run_replay_ui(args: argparse.Namespace, layout: str, generated, analysis, ag
         env,
         max_steps=args.max_steps,
         window_title=(
-            f"GridBattle Replay - {args.agent} - "
+            f"GridBattle Replay - {canonical_agent_name(args.agent)} - "
             f"{args.size}/{args.map_type} - seed {map_seed}"
         ),
         tile_size=args.tile_size,
         agent=make_agent(),
-        agent_name=args.agent,
+        agent_name=canonical_agent_name(args.agent),
         agent_delay_ms=args.delay_ms,
         agent_start_paused=args.pause,
         agent_factory=make_agent,
@@ -683,11 +783,24 @@ def run_replay_ui(args: argparse.Namespace, layout: str, generated, analysis, ag
     )
 
     window.status_message = (
-        f"Agent replay: {args.agent}. "
+        f"Agent replay: {canonical_agent_name(args.agent)}. "
         "Space pauses/resumes, Enter steps once, R resets, Esc quits."
     )
 
     window.run()
+
+
+def parse_csv_list(raw: str, valid: tuple[str, ...] | list[str], name: str) -> list[str]:
+    values = [part.strip() for part in raw.split(",") if part.strip()]
+    valid_set = set(valid)
+    unknown = [value for value in values if value not in valid_set]
+
+    if unknown:
+        raise SystemExit(
+            f"Invalid {name}: {unknown}. Valid values: {sorted(valid_set)}"
+        )
+
+    return values
 
 
 def add_worker_arg(parser: argparse.ArgumentParser) -> None:
@@ -695,10 +808,7 @@ def add_worker_arg(parser: argparse.ArgumentParser) -> None:
         "--workers",
         type=int,
         default=1,
-        help=(
-            "Number of worker processes for parallel episode evaluation. "
-            "Use 1 for sequential execution."
-        ),
+        help="Number of worker processes for parallel episode evaluation.",
     )
 
 
@@ -720,19 +830,13 @@ def parse_args() -> argparse.Namespace:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    smoke = subparsers.add_parser(
-        "smoke",
-        help="Run a quick real-environment sanity check.",
-    )
+    smoke = subparsers.add_parser("smoke", help="Run a quick real-environment sanity check.")
     smoke.add_argument("--episodes", type=int, default=2)
     smoke.add_argument("--seed", type=int, default=11)
     smoke.add_argument("--max-steps", type=int, default=60)
     add_worker_arg(smoke)
 
-    eval_parser = subparsers.add_parser(
-        "eval",
-        help="Run one real-environment evaluation configuration.",
-    )
+    eval_parser = subparsers.add_parser("eval", help="Run one real-environment evaluation.")
     add_common_eval_args(eval_parser)
     eval_parser.add_argument("--agent", choices=AGENT_PROFILES, default="heuristic")
     eval_parser.add_argument("--csv-out", default=None)
@@ -741,7 +845,7 @@ def parse_args() -> argparse.Namespace:
 
     pilot = subparsers.add_parser(
         "balance-pilot",
-        help="Run the first PCG balancing pilot: size x map_type x skill ladder.",
+        help="Quick size x map_type x validation-agent pilot.",
     )
     pilot.add_argument("--episodes", type=int, default=10)
     pilot.add_argument("--seed", type=int, default=11)
@@ -753,45 +857,36 @@ def parse_args() -> argparse.Namespace:
     pilot.add_argument("--overwrite", action="store_true")
     add_worker_arg(pilot)
 
+    screen = subparsers.add_parser(
+        "pcg-screen",
+        help="Reduced factorial PCG screening with size-scaled profiles.",
+    )
+    screen.add_argument("--episodes", type=int, default=10)
+    screen.add_argument("--seed", type=int, default=11)
+    screen.add_argument("--max-steps", type=int, default=120)
+    screen.add_argument("--csv-out", default="results/pcg_screening.csv")
+    screen.add_argument("--overwrite", action="store_true")
+    screen.add_argument("--dry-run", action="store_true")
+    screen.add_argument("--sizes", default=",".join(DEFAULT_SCREEN_SIZES))
+    screen.add_argument("--map-types", default=",".join(DEFAULT_SCREEN_MAP_TYPES))
+    screen.add_argument("--enemy-profiles", default=",".join(DEFAULT_SCREEN_ENEMY_PROFILES))
+    screen.add_argument("--item-profiles", default=",".join(DEFAULT_SCREEN_ITEM_PROFILES))
+    screen.add_argument("--wall-profiles", default=",".join(DEFAULT_SCREEN_WALL_PROFILES))
+    screen.add_argument("--agents", default=",".join(DEFAULT_SCREEN_AGENTS))
+    add_worker_arg(screen)
+
     replay = subparsers.add_parser(
         "replay",
         help="Inspect one generated game as text or with the normal Pygame UI.",
     )
     add_common_eval_args(replay)
     replay.add_argument("--agent", choices=AGENT_PROFILES, default="heuristic")
-    replay.add_argument(
-        "--episode",
-        type=int,
-        default=0,
-        help="Episode index. The generated map seed is seed + episode.",
-    )
-    replay.add_argument(
-        "--pause",
-        action="store_true",
-        help="Pause after every turn in text mode; start paused in UI mode.",
-    )
-    replay.add_argument(
-        "--log-out",
-        default=None,
-        help="Optional path for writing the replay text log.",
-    )
-    replay.add_argument(
-        "--ui",
-        action="store_true",
-        help="Show the existing Pygame UI as an autoplay replay viewer.",
-    )
-    replay.add_argument(
-        "--delay-ms",
-        type=int,
-        default=600,
-        help="Delay between automatic UI steps.",
-    )
-    replay.add_argument(
-        "--tile-size",
-        type=int,
-        default=68,
-        help="Tile size used by the existing Pygame UI.",
-    )
+    replay.add_argument("--episode", type=int, default=0)
+    replay.add_argument("--pause", action="store_true")
+    replay.add_argument("--log-out", default=None)
+    replay.add_argument("--ui", action="store_true")
+    replay.add_argument("--delay-ms", type=int, default=600)
+    replay.add_argument("--tile-size", type=int, default=68)
 
     return parser.parse_args()
 
@@ -810,6 +905,13 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         csv_out=args.csv_out,
         quiet=args.quiet,
         workers=getattr(args, "workers", 1),
+        experiment_name="manual_eval",
+        cell_id=(
+            f"manual_eval:"
+            f"size={args.size}:map_type={args.map_type}:"
+            f"enemy_count={args.enemy_count}:items={args.items}:"
+            f"wall_density={args.wall_density}:agent={canonical_agent_name(args.agent)}"
+        ),
     )
 
 
@@ -818,7 +920,7 @@ def run_smoke(args: argparse.Namespace) -> None:
     print("This uses GridBattleEnv directly and does not open the Pygame UI.")
     print()
 
-    smoke_agents = ("random", "heuristic", "mcts_weak")
+    smoke_agents = ("random", "heuristic", "mcts_small")
 
     for agent_name in smoke_agents:
         config = ExperimentConfig(
@@ -832,6 +934,8 @@ def run_smoke(args: argparse.Namespace) -> None:
             wall_density="default",
             max_steps=args.max_steps,
             workers=getattr(args, "workers", 1),
+            experiment_name="smoke",
+            cell_id=f"smoke:{agent_name}",
         )
         run_evaluation(config)
         print()
@@ -845,22 +949,22 @@ def run_balance_pilot(args: argparse.Namespace) -> None:
 
     print("Running PCG balance pilot.")
     print("Engine: Griddly-backed GridBattleEnv")
-    print("Design: size x map_type x skill ladder")
+    print("Design: size x map_type x validation agents")
     print(f"Episodes per cell: {args.episodes}")
     print(f"Workers per cell: {args.workers}")
     print(f"CSV output: {csv_out}")
     print()
     print(
-        "  size |    map_type | agent                         | "
-        "winrate | turns |  dmg | choke | reach "
+        "  size |    map_type | enemy |  item |   wall | agent                        | "
+        "winrate | turns |  dmg | choke"
     )
-    print("-" * 96)
+    print("-" * 122)
 
     cells = [
         (size, map_type, agent_name)
         for size in MAP_SIZES
         for map_type in MAP_TYPES
-        for agent_name in BALANCE_AGENT_PROFILES
+        for agent_name in VALIDATION_AGENT_PROFILES
     ]
 
     for size, map_type, agent_name in cells:
@@ -876,12 +980,114 @@ def run_balance_pilot(args: argparse.Namespace) -> None:
             max_steps=args.max_steps,
             csv_out=csv_out,
             quiet=True,
-            swept_variable="balance_pilot",
-            swept_value=f"{size}:{map_type}:{agent_name}",
+            experiment_name="balance_pilot",
+            cell_id=f"balance_pilot:{size}:{map_type}:{agent_name}",
             workers=getattr(args, "workers", 1),
         )
 
         results = run_evaluation(config)
+        print_compact_result(config, results)
+
+    print()
+    print(f"Done. Results written to {csv_out}")
+
+
+def run_pcg_screen(args: argparse.Namespace) -> None:
+    sizes = parse_csv_list(args.sizes, list(MAP_SIZES.keys()), "sizes")
+    map_types = parse_csv_list(args.map_types, list(MAP_TYPES), "map-types")
+    enemy_profiles = parse_csv_list(args.enemy_profiles, list(ENEMY_PROFILES), "enemy-profiles")
+    item_profiles = parse_csv_list(args.item_profiles, list(ITEM_PROFILES), "item-profiles")
+    wall_profiles = parse_csv_list(args.wall_profiles, list(WALL_PROFILES), "wall-profiles")
+    agents = parse_csv_list(args.agents, list(AGENT_PROFILES), "agents")
+
+    csv_out = args.csv_out
+
+    cells: list[ExperimentConfig] = []
+
+    for size in sizes:
+        for map_type in map_types:
+            for enemy_profile in enemy_profiles:
+                for item_profile in item_profiles:
+                    for wall_profile in wall_profiles:
+                        enemy_count = ENEMY_PROFILES[enemy_profile][size]
+                        items = ITEM_PROFILES[item_profile][size]
+                        wall_density = WALL_PROFILES[wall_profile][map_type]
+
+                        for agent_name in agents:
+                            canonical_agent = canonical_agent_name(agent_name)
+                            cell_id = (
+                                f"pcg_screen:"
+                                f"size={size}:map_type={map_type}:"
+                                f"enemy_profile={enemy_profile}:item_profile={item_profile}:"
+                                f"wall_profile={wall_profile}:agent={canonical_agent}"
+                            )
+
+                            cells.append(
+                                ExperimentConfig(
+                                    agent=canonical_agent,
+                                    episodes=args.episodes,
+                                    seed=args.seed,
+                                    size=size,
+                                    map_type=map_type,
+                                    items=items,
+                                    enemy_count=enemy_count,
+                                    wall_density=wall_density,
+                                    max_steps=args.max_steps,
+                                    csv_out=csv_out,
+                                    quiet=True,
+                                    experiment_name="pcg_screen",
+                                    cell_id=cell_id,
+                                    enemy_profile=enemy_profile,
+                                    item_profile=item_profile,
+                                    wall_profile=wall_profile,
+                                    workers=getattr(args, "workers", 1),
+                                )
+                            )
+
+    total_episodes = len(cells) * args.episodes
+
+    print("Running PCG screening experiment.")
+    print("Engine: Griddly-backed GridBattleEnv")
+    print("Design: reduced factorial with size-aware enemy/item profiles and map-type-aware wall profiles")
+    print(f"Cells: {len(cells)}")
+    print(f"Episodes per cell: {args.episodes}")
+    print(f"Total episodes: {total_episodes}")
+    print(f"Workers per cell: {args.workers}")
+    print(f"CSV output: {csv_out}")
+    print()
+    print(f"Sizes: {sizes}")
+    print(f"Map types: {map_types}")
+    print(f"Enemy profiles: {enemy_profiles}")
+    print(f"Item profiles: {item_profiles}")
+    print(f"Wall profiles: {wall_profiles}")
+    print(f"Agents: {[canonical_agent_name(agent) for agent in agents]}")
+    print()
+
+    if args.dry_run:
+        print("Dry run only. First 20 cells:")
+        for config in cells[:20]:
+            print(
+                f"{config.cell_id} -> "
+                f"enemy_count={config.enemy_count}, "
+                f"items={config.items}, "
+                f"wall_density={config.wall_density}"
+            )
+        if len(cells) > 20:
+            print(f"... {len(cells) - 20} more cells")
+        return
+
+    if args.overwrite and os.path.exists(csv_out):
+        os.remove(csv_out)
+
+    print(
+        "  size |    map_type | enemy |  item |   wall | agent                        | "
+        "winrate | turns |  dmg | choke"
+    )
+    print("-" * 122)
+
+    for index, config in enumerate(cells, start=1):
+        results = run_evaluation(config)
+        print(f"[{index:>3}/{len(cells)}] ", end="")
         print_compact_result(config, results)
 
     print()
@@ -897,6 +1103,8 @@ def main() -> None:
         run_evaluation(config_from_args(args))
     elif args.command == "balance-pilot":
         run_balance_pilot(args)
+    elif args.command == "pcg-screen":
+        run_pcg_screen(args)
     elif args.command == "replay":
         run_replay(args)
     else:
