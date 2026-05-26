@@ -30,13 +30,14 @@ def simulate_turn(snapshot: BattleSnapshot, turn: TurnAction) -> BattleSnapshot:
     player_position = snapshot.player.position
     player_health = snapshot.player.health
     enemy_positions = {enemy.position: enemy.health for enemy in snapshot.enemies}
+    bunkers = set(snapshot.bunkers)
 
-    on_bunker = player_position in snapshot.bunkers
-
-    # player move (skipped on bunker, matches the real env in game.py)
-    if not on_bunker and turn.move_direction is not None:
+    # Player movement.
+    # Bunkers no longer block movement.
+    if turn.move_direction is not None:
         dx, dy = action_to_delta(turn.move_direction)
         target = (player_position[0] + dx, player_position[1] + dy)
+
         if (
             0 <= target[0] < width
             and 0 <= target[1] < height
@@ -45,24 +46,27 @@ def simulate_turn(snapshot: BattleSnapshot, turn: TurnAction) -> BattleSnapshot:
         ):
             player_position = target
 
-    # primary attack
+    # Primary attack.
     if turn.action is not None and turn.action.action_type in _ATTACK_TYPES and turn.action.direction is not None:
         _apply_player_attack(snapshot, turn.action.direction, player_position, walls, enemy_positions)
 
-    # second attack (used with dual_berettas in the real env). we apply the
-    # damage but dont check the prerequisite effect.
+    # Second attack, used with dual_berettas in the real env.
+    # We apply the damage but do not check the prerequisite effect.
     if turn.action2 is not None and turn.action2.action_type in _ATTACK_TYPES and turn.action2.direction is not None:
         _apply_player_attack(snapshot, turn.action2.direction, player_position, walls, enemy_positions)
 
-    # enemy phase
+    # Enemy phase.
     enemy_order = sorted(enemy_positions.keys())
+
     for original_position in enemy_order:
         if original_position not in enemy_positions:
             continue
+
         if player_position is None:
             break
 
         enemy_profile = get_unit_profile(snapshot, "enemy", original_position)
+
         next_step = _next_step_toward(
             start=original_position,
             goal=player_position,
@@ -71,15 +75,24 @@ def simulate_turn(snapshot: BattleSnapshot, turn: TurnAction) -> BattleSnapshot:
             width=width,
             height=height,
         )
+
         if next_step is None:
             continue
 
         if next_step == player_position:
-            if not on_bunker:
-                player_health -= enemy_profile.attack_damage
-                if player_health <= 0:
-                    player_position = None
-                    player_health = 0
+            damage = enemy_profile.attack_damage
+
+            # Bunker: absorb exactly 1 incoming damage once, then disappear.
+            if player_position in bunkers and damage > 0:
+                damage = max(0, damage - 1)
+                bunkers.remove(player_position)
+
+            player_health -= damage
+
+            if player_health <= 0:
+                player_position = None
+                player_health = 0
+
             continue
 
         enemy_health = enemy_positions.pop(original_position)
@@ -91,6 +104,7 @@ def simulate_turn(snapshot: BattleSnapshot, turn: TurnAction) -> BattleSnapshot:
             key=lambda unit: unit.position,
         )
     )
+
     player = UnitState(position=player_position, health=player_health) if player_position is not None else None
 
     return dataclasses.replace(
@@ -99,6 +113,7 @@ def simulate_turn(snapshot: BattleSnapshot, turn: TurnAction) -> BattleSnapshot:
         player_turns=snapshot.player_turns + 1,
         player=player,
         enemies=enemies,
+        bunkers=frozenset(bunkers),
     )
 
 

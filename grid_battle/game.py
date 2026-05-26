@@ -368,7 +368,8 @@ class GridBattleEnv:
         cleaned_level, terrain, map_items = _strip_special_tiles(level)
         self._hills: frozenset[tuple[int, int]] = terrain[TERRAIN_HILL]
         self._bushes: frozenset[tuple[int, int]] = terrain[TERRAIN_BUSH]
-        self._bunkers: frozenset[tuple[int, int]] = terrain[TERRAIN_BUNKER]
+        self._original_bunkers: frozenset[tuple[int, int]] = terrain[TERRAIN_BUNKER]
+        self._bunkers: frozenset[tuple[int, int]] = self._original_bunkers
         self._original_map_items: dict[tuple[int, int], str] = dict(map_items)
         self._map_items: dict[tuple[int, int], str] = dict(map_items)
         self._player_hp: int = DEFAULT_COMBAT_RULES.player.max_health
@@ -396,6 +397,7 @@ class GridBattleEnv:
         self._player_hp = DEFAULT_COMBAT_RULES.player.max_health
         self._prev_griddly_player_hp = _GRIDDLY_PLAYER_HP
         self._player_pos = None
+        self._bunkers = self._original_bunkers
         self._map_items = dict(self._original_map_items)
         self._inventory = []
         self._active_effects = []
@@ -410,35 +412,33 @@ class GridBattleEnv:
             duration = 1 if turn.activate_item == ITEM_GOLDEN_GUN else ITEM_DURATIONS.get(turn.activate_item, 1)
             self._active_effects.append(ActiveEffect(turn.activate_item, duration))
 
-        on_bunker = self._player_pos is not None and self._player_pos in self._bunkers
-        if on_bunker:
-            turn = TurnAction(
-                move_direction=None,
-                move_directions=(),
-                action=turn.action,
-                action2=turn.action2,
-                activate_item=None,
-            )
-
+        # Important: do not suppress movement on bunker tiles.
+        # Bunkers are consumable cover now, not immobilizing safe zones.
         low_level_actions = self._encode_turn(turn)
         observation, reward, done, info = self._env.step(low_level_actions)
         del observation
+
         self.player_turns += 1
 
         griddly_state = self._env.get_state()
+        new_pos = _player_position_from_state(griddly_state)
         griddly_hp = _griddly_player_health_from_state(griddly_state)
+
         if griddly_hp is not None:
             raw_damage = self._prev_griddly_player_hp - griddly_hp
+
             if raw_damage > 0:
-                new_pos = _player_position_from_state(griddly_state)
                 if new_pos in self._bushes and random.random() < 0.5:
                     raw_damage = 0
-                if on_bunker:
-                    raw_damage = 0
-                self._player_hp = max(0, self._player_hp - raw_damage)
+
+                # Bunker: absorb exactly 1 incoming damage once, then disappear.
+                if new_pos in self._bunkers:
+                    raw_damage = max(0, raw_damage - 1)
+                    self._bunkers = self._bunkers - {new_pos}
+
+            self._player_hp = max(0, self._player_hp - raw_damage)
             self._prev_griddly_player_hp = griddly_hp
 
-        new_pos = _player_position_from_state(griddly_state)
         if new_pos is not None and new_pos in self._map_items:
             self._inventory.append(self._map_items.pop(new_pos))
 
