@@ -1702,8 +1702,6 @@ class GridBattleWindow:
             return {}
 
         origin = self.snapshot.player.position
-        if origin in self.snapshot.bunkers:
-            return {}
 
         options: dict[tuple[int, int], MoveOption] = {}
         max_steps = self._max_move_steps()
