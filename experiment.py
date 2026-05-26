@@ -1,8 +1,8 @@
-# experiment.py
 from __future__ import annotations
 
 import argparse
 import csv
+import inspect
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +16,6 @@ from grid_battle import (
     MctsAgent,
     RandomAgent,
     TurnAction,
-    generate_preset_level,
 )
 from grid_battle.pcg import (
     ENEMY_COUNT_LEVELS,
@@ -24,45 +23,57 @@ from grid_battle.pcg import (
     MAP_SIZES,
     MAP_TYPES,
     WALL_DENSITY_LEVELS,
+    analyze_level,
+    generate_preset_level,
 )
 
 
-AGENTS = ("random", "heuristic", "mcts")
+AGENT_PROFILES = (
+    "random",
+    "heuristic",
+    "mcts_weak",
+    "mcts_medium",
+    "mcts_strong",
+)
 
-# Keep the sweep focused on real game parameters that are actually represented
-# in generated maps. Combat stat sweeps were simulator-only and are intentionally
-# removed from the real-environment experiment interface.
-SWEEP_DEFAULTS: dict[str, str] = {
-    "size": "medium",
-    "map_type": "random_walk",
-    "items": "default",
-    "enemy_count": "default",
-    "wall_density": "default",
+BALANCE_AGENT_PROFILES = (
+    "random",
+    "heuristic",
+    "mcts_weak",
+    "mcts_medium",
+    "mcts_strong",
+)
+
+
+@dataclass(frozen=True)
+class MctsProfile:
+    iterations: int
+    rollout_depth: int
+    exploration: float = 2 ** 0.5
+
+
+MCTS_PROFILES: dict[str, MctsProfile] = {
+    "mcts_weak": MctsProfile(iterations=50, rollout_depth=10),
+    "mcts_medium": MctsProfile(iterations=200, rollout_depth=30),
+    "mcts_strong": MctsProfile(iterations=800, rollout_depth=40),
 }
 
-SWEEP_VARIABLES: dict[str, tuple[str, list[str]]] = {
-    "size": ("size", ["small", "medium", "large"]),
-    "map_type": ("map_type", ["baseline", "random_walk", "arena"]),
-    "items": ("items", ["none", "default", "double"]),
-    "enemy_count": ("enemy_count", ["low", "default", "high"]),
-    "wall_density": ("wall_density", ["low", "default", "high"]),
-}
 
 CSV_COLUMNS = [
     "engine",
     "agent",
+    "mcts_iterations",
+    "mcts_rollout_depth",
+    "mcts_exploration",
     "size",
     "map_type",
     "items",
-    "enemy_count",
+    "enemy_count_setting",
     "wall_density",
-    "mcts_iterations",
     "max_steps",
     "seed",
     "episode",
     "map_seed",
-    "map_width",
-    "map_height",
     "swept_variable",
     "swept_value",
     "won",
@@ -70,6 +81,19 @@ CSV_COLUMNS = [
     "damage_taken",
     "final_hp",
     "remaining_enemies",
+    "map_width",
+    "map_height",
+    "generated_enemy_count",
+    "generated_obstacle_count",
+    "generated_obstacle_density",
+    "structurally_valid",
+    "reachable_floor_fraction",
+    "interior_wall_density",
+    "dead_end_count",
+    "chokepoint_count",
+    "min_enemy_attack_distance",
+    "avg_enemy_attack_distance",
+    "max_enemy_attack_distance",
 ]
 
 
@@ -89,7 +113,6 @@ class ExperimentConfig:
     enemy_count: str
     wall_density: str
     max_steps: int
-    mcts_iterations: int
     csv_out: str | None = None
     quiet: bool = False
     swept_variable: str = ""
@@ -106,27 +129,53 @@ class EpisodeResult:
     map_seed: int
     map_width: int
     map_height: int
+    generated_enemy_count: int
+    generated_obstacle_count: int
+    generated_obstacle_density: float
+    structurally_valid: bool
+    reachable_floor_fraction: float
+    interior_wall_density: float
+    dead_end_count: int
+    chokepoint_count: int
+    min_enemy_attack_distance: int | None
+    avg_enemy_attack_distance: float | None
+    max_enemy_attack_distance: int | None
 
 
-def require_real_environment() -> None:
-    if GridBattleEnv is None:
-        raise SystemExit(
-            "GridBattleEnv could not be imported. "
-            "Real-environment experiments require Griddly to be installed."
-        )
+def mcts_profile_for(agent_name: str) -> MctsProfile | None:
+    return MCTS_PROFILES.get(agent_name)
 
 
-def build_agent(name: str, *, mcts_iterations: int, seed: int) -> Agent:
-    if name == "heuristic":
-        return HeuristicAgent()
+def build_mcts_agent(profile_name: str, seed: int) -> MctsAgent:
+    profile = MCTS_PROFILES[profile_name]
 
+    signature = inspect.signature(MctsAgent)
+    supported = signature.parameters
+
+    kwargs = {}
+    if "iterations" in supported:
+        kwargs["iterations"] = profile.iterations
+    if "rollout_depth" in supported:
+        kwargs["rollout_depth"] = profile.rollout_depth
+    if "exploration" in supported:
+        kwargs["exploration"] = profile.exploration
+    if "seed" in supported:
+        kwargs["seed"] = seed
+
+    return MctsAgent(**kwargs)
+
+
+def build_agent(name: str, seed: int) -> Agent:
     if name == "random":
         return RandomAgent(seed=seed)
 
-    if name == "mcts":
-        return MctsAgent(iterations=mcts_iterations, seed=seed)
+    if name == "heuristic":
+        return HeuristicAgent()
 
-    raise ValueError(f"Unknown agent: {name}")
+    if name in MCTS_PROFILES:
+        return build_mcts_agent(name, seed)
+
+    raise ValueError(f"Unknown agent profile: {name}")
 
 
 def run_episode(
@@ -137,7 +186,12 @@ def run_episode(
     map_seed: int,
     map_width: int,
     map_height: int,
+    generated_enemy_count: int,
+    generated_obstacle_count: int,
+    generated_obstacle_density: float,
 ) -> EpisodeResult:
+    analysis = analyze_level(layout)
+
     env = GridBattleEnv(layout, max_steps=max_steps)
 
     try:
@@ -167,6 +221,17 @@ def run_episode(
             map_seed=map_seed,
             map_width=map_width,
             map_height=map_height,
+            generated_enemy_count=generated_enemy_count,
+            generated_obstacle_count=generated_obstacle_count,
+            generated_obstacle_density=generated_obstacle_density,
+            structurally_valid=analysis.structurally_valid,
+            reachable_floor_fraction=analysis.reachable_floor_fraction,
+            interior_wall_density=analysis.interior_wall_density,
+            dead_end_count=analysis.dead_end_count,
+            chokepoint_count=analysis.chokepoint_count,
+            min_enemy_attack_distance=analysis.min_enemy_attack_distance,
+            avg_enemy_attack_distance=analysis.avg_enemy_attack_distance,
+            max_enemy_attack_distance=analysis.max_enemy_attack_distance,
         )
 
     finally:
@@ -184,6 +249,7 @@ def append_results_to_csv(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     file_exists = path.exists() and path.stat().st_size > 0
+    profile = mcts_profile_for(config.agent)
 
     with path.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
@@ -196,18 +262,18 @@ def append_results_to_csv(
                 {
                     "engine": "griddly",
                     "agent": config.agent,
+                    "mcts_iterations": profile.iterations if profile else "",
+                    "mcts_rollout_depth": profile.rollout_depth if profile else "",
+                    "mcts_exploration": profile.exploration if profile else "",
                     "size": config.size,
                     "map_type": config.map_type,
                     "items": config.items,
-                    "enemy_count": config.enemy_count,
+                    "enemy_count_setting": config.enemy_count,
                     "wall_density": config.wall_density,
-                    "mcts_iterations": config.mcts_iterations,
                     "max_steps": config.max_steps,
                     "seed": config.seed,
                     "episode": episode_index,
                     "map_seed": result.map_seed,
-                    "map_width": result.map_width,
-                    "map_height": result.map_height,
                     "swept_variable": config.swept_variable,
                     "swept_value": config.swept_value,
                     "won": int(result.won),
@@ -215,19 +281,25 @@ def append_results_to_csv(
                     "damage_taken": result.damage_taken,
                     "final_hp": result.final_hp,
                     "remaining_enemies": result.remaining_enemies,
+                    "map_width": result.map_width,
+                    "map_height": result.map_height,
+                    "generated_enemy_count": result.generated_enemy_count,
+                    "generated_obstacle_count": result.generated_obstacle_count,
+                    "generated_obstacle_density": result.generated_obstacle_density,
+                    "structurally_valid": int(result.structurally_valid),
+                    "reachable_floor_fraction": result.reachable_floor_fraction,
+                    "interior_wall_density": result.interior_wall_density,
+                    "dead_end_count": result.dead_end_count,
+                    "chokepoint_count": result.chokepoint_count,
+                    "min_enemy_attack_distance": result.min_enemy_attack_distance,
+                    "avg_enemy_attack_distance": result.avg_enemy_attack_distance,
+                    "max_enemy_attack_distance": result.max_enemy_attack_distance,
                 }
             )
 
 
 def run_evaluation(config: ExperimentConfig) -> list[EpisodeResult]:
-    require_real_environment()
-
-    agent = build_agent(
-        config.agent,
-        mcts_iterations=config.mcts_iterations,
-        seed=config.seed,
-    )
-
+    agent = build_agent(config.agent, seed=config.seed)
     results: list[EpisodeResult] = []
 
     for episode_index in range(config.episodes):
@@ -249,6 +321,9 @@ def run_evaluation(config: ExperimentConfig) -> list[EpisodeResult]:
             map_seed=map_seed,
             map_width=generated.width,
             map_height=generated.height,
+            generated_enemy_count=generated.enemy_count,
+            generated_obstacle_count=generated.obstacle_count,
+            generated_obstacle_density=generated.obstacle_density,
         )
 
         results.append(result)
@@ -262,18 +337,24 @@ def run_evaluation(config: ExperimentConfig) -> list[EpisodeResult]:
     return results
 
 
-def print_summary(config: ExperimentConfig, results: list[EpisodeResult]) -> None:
-    wins = sum(result.won for result in results)
-    win_rate = wins / len(results)
-    losses = [result for result in results if not result.won]
+def win_rate(results: list[EpisodeResult]) -> float:
+    return sum(result.won for result in results) / len(results)
 
-    avg_remaining_enemies_on_losses = (
-        mean(result.remaining_enemies for result in losses) if losses else 0.0
-    )
+
+def avg_or_zero(values: list[float | int]) -> float:
+    return mean(values) if values else 0.0
+
+
+def print_summary(config: ExperimentConfig, results: list[EpisodeResult]) -> None:
+    losses = [result for result in results if not result.won]
+    profile = mcts_profile_for(config.agent)
 
     print("Real-environment evaluation summary")
     print("Engine: Griddly-backed GridBattleEnv")
     print(f"Agent: {config.agent}")
+    if profile:
+        print(f"MCTS iterations: {profile.iterations}")
+        print(f"MCTS rollout depth: {profile.rollout_depth}")
     print(f"Episodes: {config.episodes}")
     print(f"Map type: {config.map_type}")
     print(f"Map size preset: {config.size}")
@@ -284,100 +365,393 @@ def print_summary(config: ExperimentConfig, results: list[EpisodeResult]) -> Non
         f"wall_density={config.wall_density}"
     )
     print(f"Max steps: {config.max_steps}")
-    if config.agent == "mcts":
-        print(f"MCTS iterations: {config.mcts_iterations}")
-    print(f"Win rate: {win_rate:.1%}")
+    print(f"Win rate: {win_rate(results):.1%}")
     print(f"Average turns: {mean(result.turns for result in results):.2f}")
     print(f"Average damage taken: {mean(result.damage_taken for result in results):.2f}")
     print(f"Average final HP: {mean(result.final_hp for result in results):.2f}")
-    print(f"Average enemies left on losses: {avg_remaining_enemies_on_losses:.2f}")
+    print(
+        "Average enemies left on losses: "
+        f"{avg_or_zero([result.remaining_enemies for result in losses]):.2f}"
+    )
+    print(
+        "Average reachable floor fraction: "
+        f"{mean(result.reachable_floor_fraction for result in results):.1%}"
+    )
+    print(f"Average chokepoints: {mean(result.chokepoint_count for result in results):.2f}")
 
+
+def print_compact_result(config: ExperimentConfig, results: list[EpisodeResult]) -> None:
+    profile = mcts_profile_for(config.agent)
+    profile_note = ""
+    if profile:
+        profile_note = f" ({profile.iterations} it, depth {profile.rollout_depth})"
+
+    print(
+        f"{config.size:>6} | "
+        f"{config.map_type:>11} | "
+        f"{config.agent:<12}{profile_note:<18} | "
+        f"WR {win_rate(results):>6.1%} | "
+        f"turns {mean(result.turns for result in results):>5.1f} | "
+        f"dmg {mean(result.damage_taken for result in results):>4.1f} | "
+        f"choke {mean(result.chokepoint_count for result in results):>4.1f} | "
+        f"reach {mean(result.reachable_floor_fraction for result in results):>6.1%}"
+    )
+
+
+
+def direction_name(direction: int | None) -> str:
+    names = {
+        1: "up",
+        2: "right",
+        3: "down",
+        4: "left",
+    }
+    if direction is None:
+        return "none"
+    return names.get(direction, str(direction))
+
+
+def describe_turn(turn: TurnAction) -> str:
+    parts: list[str] = []
+
+    if turn.activate_item is not None:
+        parts.append(f"activate={turn.activate_item}")
+
+    if turn.move_directions:
+        move_text = ",".join(direction_name(direction) for direction in turn.move_directions)
+        parts.append(f"move=[{move_text}]")
+    else:
+        parts.append(f"move={direction_name(turn.move_direction)}")
+
+    if turn.action is not None:
+        parts.append(
+            f"attack={turn.action.action_type}:{direction_name(turn.action.direction)}"
+        )
+    else:
+        parts.append("attack=none")
+
+    if turn.action2 is not None:
+        parts.append(
+            f"attack2={turn.action2.action_type}:{direction_name(turn.action2.direction)}"
+        )
+
+    return " | ".join(parts)
+
+
+def render_snapshot_text(snapshot: BattleSnapshot) -> str:
+    grid = [["." for _ in range(snapshot.width)] for _ in range(snapshot.height)]
+
+    for x, y in snapshot.walls:
+        if 0 <= x < snapshot.width and 0 <= y < snapshot.height:
+            grid[y][x] = "#"
+
+    for x, y in snapshot.hills:
+        if 0 <= x < snapshot.width and 0 <= y < snapshot.height and grid[y][x] == ".":
+            grid[y][x] = "H"
+
+    for x, y in snapshot.bushes:
+        if 0 <= x < snapshot.width and 0 <= y < snapshot.height and grid[y][x] == ".":
+            grid[y][x] = "B"
+
+    for x, y in snapshot.bunkers:
+        if 0 <= x < snapshot.width and 0 <= y < snapshot.height and grid[y][x] == ".":
+            grid[y][x] = "K"
+
+    for (x, y), item_name in snapshot.map_items:
+        if 0 <= x < snapshot.width and 0 <= y < snapshot.height and grid[y][x] == ".":
+            grid[y][x] = item_name[:1].upper()
+
+    for enemy in snapshot.enemies:
+        x, y = enemy.position
+        if 0 <= x < snapshot.width and 0 <= y < snapshot.height:
+            grid[y][x] = "E"
+
+    if snapshot.player is not None:
+        x, y = snapshot.player.position
+        if 0 <= x < snapshot.width and 0 <= y < snapshot.height:
+            grid[y][x] = "P"
+
+    return "\n".join("".join(row) for row in grid)
+
+
+def snapshot_status(snapshot: BattleSnapshot) -> str:
+    player_hp = snapshot.player.health if snapshot.player is not None else 0
+    inventory = ", ".join(snapshot.inventory) if snapshot.inventory else "-"
+    effects = (
+        ", ".join(f"{effect.name}:{effect.turns_left}" for effect in snapshot.active_effects)
+        if snapshot.active_effects
+        else "-"
+    )
+
+    return (
+        f"turn={snapshot.player_turns} | "
+        f"hp={player_hp} | "
+        f"enemies={snapshot.remaining_enemies} | "
+        f"inventory={inventory} | "
+        f"effects={effects}"
+    )
+
+
+def replay_header(args: argparse.Namespace, map_seed: int, generated, analysis) -> str:
+    return "\n".join(
+        [
+            "Replay",
+            "Engine: Griddly-backed GridBattleEnv",
+            f"Agent: {args.agent}",
+            f"Size: {args.size}",
+            f"Map type: {args.map_type}",
+            f"Episode: {args.episode}",
+            f"Seed: {args.seed}",
+            f"Map seed: {map_seed}",
+            f"Items: {args.items}",
+            f"Enemy count setting: {args.enemy_count}",
+            f"Wall density: {args.wall_density}",
+            f"Dimensions: {generated.width}x{generated.height}",
+            f"Generated enemies: {generated.enemy_count}",
+            f"Generated obstacles: {generated.obstacle_count}",
+            f"Generated obstacle density: {generated.obstacle_density:.3f}",
+            f"Structurally valid: {analysis.structurally_valid}",
+            f"Reachable floor fraction: {analysis.reachable_floor_fraction:.1%}",
+            f"Interior wall density: {analysis.interior_wall_density:.1%}",
+            f"Dead ends: {analysis.dead_end_count}",
+            f"Chokepoints: {analysis.chokepoint_count}",
+            f"Enemy attack distance min/avg/max: "
+            f"{analysis.min_enemy_attack_distance}/"
+            f"{analysis.avg_enemy_attack_distance}/"
+            f"{analysis.max_enemy_attack_distance}",
+            "",
+            "Legend:",
+            "  P player, E enemy, # wall, H hill, B bush, K bunker",
+            "  G golden gun, D dual berettas, S shotgun, V vehicle",
+            "",
+        ]
+    )
+
+
+def run_replay(args: argparse.Namespace) -> None:
+    map_seed = args.seed + args.episode
+
+    generated = generate_preset_level(
+        size=args.size,
+        map_type=args.map_type,
+        seed=map_seed,
+        item_level=args.items,
+        enemy_count=args.enemy_count,
+        wall_density=args.wall_density,
+    )
+
+    analysis = analyze_level(generated.layout)
+    agent = build_agent(args.agent, seed=args.seed)
+
+    if args.ui:
+        run_replay_ui(args, generated.layout, generated, analysis, agent, map_seed)
+        return
+
+    log_lines: list[str] = [replay_header(args, map_seed, generated, analysis)]
+
+    env = GridBattleEnv(generated.layout, max_steps=args.max_steps)
+
+    try:
+        snapshot = env.reset()
+
+        while (
+            snapshot.player is not None
+            and snapshot.remaining_enemies > 0
+            and snapshot.player_turns < args.max_steps
+        ):
+            log_lines.append("=" * 72)
+            log_lines.append(snapshot_status(snapshot))
+            log_lines.append(render_snapshot_text(snapshot))
+
+            turn = agent.act(snapshot)
+            log_lines.append(f"action: {describe_turn(turn)}")
+
+            before_hp = snapshot.player.health if snapshot.player is not None else 0
+            before_enemies = snapshot.remaining_enemies
+            before_bunkers = set(snapshot.bunkers)
+            before_items = set(snapshot.map_items)
+
+            snapshot, reward, done, info = env.step(turn)
+            del reward, info
+
+            after_hp = snapshot.player.health if snapshot.player is not None else 0
+            after_bunkers = set(snapshot.bunkers)
+            after_items = set(snapshot.map_items)
+
+            log_lines.append(
+                "result: "
+                f"hp_delta={after_hp - before_hp}, "
+                f"enemies_delta={snapshot.remaining_enemies - before_enemies}, "
+                f"bunkers_used={sorted(before_bunkers - after_bunkers)}, "
+                f"items_picked={sorted(before_items - after_items)}"
+            )
+
+            if args.pause:
+                print("\n".join(log_lines[-6:]))
+                input("Press Enter for next turn...")
+
+            if done:
+                break
+
+        log_lines.append("=" * 72)
+        log_lines.append("Final state")
+        log_lines.append(snapshot_status(snapshot))
+        log_lines.append(render_snapshot_text(snapshot))
+
+        final_hp = snapshot.player.health if snapshot.player is not None else 0
+        won = snapshot.player is not None and snapshot.remaining_enemies == 0
+
+        log_lines.append("")
+        log_lines.append(f"Won: {won}")
+        log_lines.append(f"Turns: {snapshot.player_turns}")
+        log_lines.append(f"Final HP: {final_hp}")
+        log_lines.append(f"Remaining enemies: {snapshot.remaining_enemies}")
+
+    finally:
+        close = getattr(env, "close", None)
+        if callable(close):
+            close()
+
+    output = "\n".join(log_lines)
+
+    if args.log_out:
+        log_path = Path(args.log_out)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(output)
+        print(f"Wrote replay log to {log_path}")
+    else:
+        print(output)
+
+
+
+def run_replay_ui(args: argparse.Namespace, layout: str, generated, analysis, agent: Agent, map_seed: int) -> None:
+    from grid_battle.ui_pygame import GridBattleWindow
+
+    env = GridBattleEnv(layout, max_steps=args.max_steps)
+
+    window = GridBattleWindow(
+        env,
+        max_steps=args.max_steps,
+        window_title=(
+            f"GridBattle Replay - {args.agent} - "
+            f"{args.size}/{args.map_type} - seed {map_seed}"
+        ),
+        tile_size=args.tile_size,
+        agent=agent,
+        agent_name=args.agent,
+        agent_delay_ms=args.delay_ms,
+        agent_start_paused=args.pause,
+    )
+
+    window.last_turn_summary = (
+        f"Replay map seed {map_seed}. "
+        f"Reachable floor {analysis.reachable_floor_fraction:.1%}, "
+        f"chokepoints {analysis.chokepoint_count}, "
+        f"dead ends {analysis.dead_end_count}."
+    )
+
+    window.status_message = (
+        f"Agent replay: {args.agent}. "
+        "Space pauses/resumes, Enter steps once, R resets, Esc quits."
+    )
+
+    window.run()
 
 def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--seed", type=int, default=11)
-    parser.add_argument("--size", choices=list(MAP_SIZES.keys()), default="small")
-    parser.add_argument("--map-type", choices=list(MAP_TYPES), default="baseline")
+    parser.add_argument("--size", choices=list(MAP_SIZES.keys()), default="medium")
+    parser.add_argument("--map-type", choices=list(MAP_TYPES), default="random_walk")
     parser.add_argument("--items", choices=list(ITEM_LEVELS), default="default")
-    parser.add_argument(
-        "--enemy-count",
-        choices=list(ENEMY_COUNT_LEVELS),
-        default="default",
-    )
-    parser.add_argument(
-        "--wall-density",
-        choices=list(WALL_DENSITY_LEVELS),
-        default="default",
-    )
+    parser.add_argument("--enemy-count", choices=list(ENEMY_COUNT_LEVELS), default="default")
+    parser.add_argument("--wall-density", choices=list(WALL_DENSITY_LEVELS), default="default")
     parser.add_argument("--max-steps", type=int, default=120)
-    parser.add_argument("--mcts-iterations", type=int, default=200)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run GridBattle experiments using the real Griddly-backed environment."
+        description="Run GridBattle balancing experiments using the real Griddly-backed environment."
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     smoke = subparsers.add_parser(
         "smoke",
-        help="Run a quick real-environment sanity check for all agents.",
+        help="Run a quick real-environment sanity check.",
     )
-    add_common_eval_args(smoke)
-    smoke.set_defaults(episodes=3, max_steps=60, mcts_iterations=50)
+    smoke.add_argument("--episodes", type=int, default=2)
+    smoke.add_argument("--seed", type=int, default=11)
+    smoke.add_argument("--max-steps", type=int, default=60)
 
     eval_parser = subparsers.add_parser(
         "eval",
         help="Run one real-environment evaluation configuration.",
     )
     add_common_eval_args(eval_parser)
-    eval_parser.add_argument("--agent", choices=AGENTS, default="heuristic")
-    eval_parser.add_argument(
-        "--csv-out",
-        default=None,
-        help="Optional CSV path. If set, one row per episode is appended.",
-    )
-    eval_parser.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Skip the summary printout.",
-    )
+    eval_parser.add_argument("--agent", choices=AGENT_PROFILES, default="heuristic")
+    eval_parser.add_argument("--csv-out", default=None)
+    eval_parser.add_argument("--quiet", action="store_true")
 
-    sweep = subparsers.add_parser(
-        "sweep",
-        help="Run a real-environment OFAT sweep over PCG parameters.",
+    pilot = subparsers.add_parser(
+        "balance-pilot",
+        help="Run the first PCG balancing pilot: size x map_type x skill ladder.",
     )
-    sweep.add_argument("--episodes", type=int, default=50)
-    sweep.add_argument("--seed", type=int, default=11)
-    sweep.add_argument("--mcts-iterations", type=int, default=200)
-    sweep.add_argument("--max-steps", type=int, default=120)
-    sweep.add_argument("--csv-out", default="results/ofat_griddly.csv")
-    sweep.add_argument(
-        "--only",
+    pilot.add_argument("--episodes", type=int, default=10)
+    pilot.add_argument("--seed", type=int, default=11)
+    pilot.add_argument("--items", choices=list(ITEM_LEVELS), default="default")
+    pilot.add_argument("--enemy-count", choices=list(ENEMY_COUNT_LEVELS), default="default")
+    pilot.add_argument("--wall-density", choices=list(WALL_DENSITY_LEVELS), default="default")
+    pilot.add_argument("--max-steps", type=int, default=120)
+    pilot.add_argument("--csv-out", default="results/balance_pilot.csv")
+    pilot.add_argument("--overwrite", action="store_true")
+
+
+    replay = subparsers.add_parser(
+        "replay",
+        help="Inspect one generated game as text or with a simple autoplay UI.",
+    )
+    add_common_eval_args(replay)
+    replay.add_argument("--agent", choices=AGENT_PROFILES, default="heuristic")
+    replay.add_argument(
+        "--episode",
+        type=int,
+        default=0,
+        help="Episode index. The generated map seed is seed + episode.",
+    )
+    replay.add_argument(
+        "--pause",
+        action="store_true",
+        help="Pause after every turn in text mode; start paused in UI mode.",
+    )
+    replay.add_argument(
+        "--log-out",
         default=None,
-        help=(
-            "Comma-separated subset of variables to sweep. "
-            f"Valid: {', '.join(SWEEP_VARIABLES)}"
-        ),
+        help="Optional path for writing the replay text log.",
     )
-    sweep.add_argument(
-        "--overwrite",
+    replay.add_argument(
+        "--ui",
         action="store_true",
-        help="Delete the output CSV before running.",
+        help="Show a simple Pygame autoplay replay viewer.",
     )
-    sweep.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print planned cells without running them.",
+    replay.add_argument(
+        "--delay-ms",
+        type=int,
+        default=600,
+        help="Delay between automatic UI steps.",
+    )
+    replay.add_argument(
+        "--tile-size",
+        type=int,
+        default=68,
+        help="Tile size used by the existing Pygame UI.",
     )
 
     return parser.parse_args()
 
 
-def config_from_args(args: argparse.Namespace, *, agent: str | None = None) -> ExperimentConfig:
+def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     return ExperimentConfig(
-        agent=agent or args.agent,
+        agent=args.agent,
         episodes=args.episodes,
         seed=args.seed,
         size=args.size,
@@ -386,99 +760,81 @@ def config_from_args(args: argparse.Namespace, *, agent: str | None = None) -> E
         enemy_count=args.enemy_count,
         wall_density=args.wall_density,
         max_steps=args.max_steps,
-        mcts_iterations=args.mcts_iterations,
-        csv_out=getattr(args, "csv_out", None),
-        quiet=getattr(args, "quiet", False),
+        csv_out=args.csv_out,
+        quiet=args.quiet,
     )
 
 
 def run_smoke(args: argparse.Namespace) -> None:
     print("Running real-environment smoke test.")
     print("This uses GridBattleEnv directly and does not open the Pygame UI.")
+    print()
 
-    for agent in AGENTS:
-        print()
-        config = config_from_args(args, agent=agent)
-        run_evaluation(config)
+    smoke_agents = ("random", "heuristic", "mcts_weak")
 
-
-def parse_only_filter(raw: str | None) -> list[str]:
-    if raw is None:
-        return list(SWEEP_VARIABLES)
-
-    selected = [part.strip() for part in raw.split(",") if part.strip()]
-    unknown = [name for name in selected if name not in SWEEP_VARIABLES]
-
-    if unknown:
-        raise SystemExit(
-            f"Unknown sweep variable(s): {unknown}. "
-            f"Valid: {list(SWEEP_VARIABLES)}"
-        )
-
-    return selected
-
-
-def run_sweep(args: argparse.Namespace) -> None:
-    require_real_environment()
-
-    selected_variables = parse_only_filter(args.only)
-
-    cells: list[tuple[str, str, str]] = []
-    for variable in selected_variables:
-        _, levels = SWEEP_VARIABLES[variable]
-        for level in levels:
-            for agent in AGENTS:
-                cells.append((variable, level, agent))
-
-    print("Real-environment OFAT sweep")
-    print("Engine: Griddly-backed GridBattleEnv")
-    print(f"Cells: {len(cells)}")
-    print(f"Episodes per cell: {args.episodes}")
-    print(f"Total episodes: {len(cells) * args.episodes}")
-    print(f"CSV output: {args.csv_out}")
-
-    if args.dry_run:
-        print()
-        print("Dry run only. Planned cells:")
-        for variable, level, agent in cells:
-            print(f"  {variable}={level}, agent={agent}")
-        return
-
-    if args.overwrite and os.path.exists(args.csv_out):
-        os.remove(args.csv_out)
-
-    for index, (variable, level, agent) in enumerate(cells, start=1):
-        flag_name, _ = SWEEP_VARIABLES[variable]
-        values = dict(SWEEP_DEFAULTS)
-        values[flag_name] = level
-
+    for agent_name in smoke_agents:
         config = ExperimentConfig(
-            agent=agent,
+            agent=agent_name,
             episodes=args.episodes,
             seed=args.seed,
-            size=values["size"],
-            map_type=values["map_type"],
-            items=values["items"],
-            enemy_count=values["enemy_count"],
-            wall_density=values["wall_density"],
+            size="small",
+            map_type="baseline",
+            items="default",
+            enemy_count="default",
+            wall_density="default",
             max_steps=args.max_steps,
-            mcts_iterations=args.mcts_iterations,
-            csv_out=args.csv_out,
-            quiet=True,
-            swept_variable=variable,
-            swept_value=level,
         )
-
-        print(
-            f"[{index}/{len(cells)}] "
-            f"{variable}={level}, agent={agent}, "
-            f"episodes={args.episodes}"
-        )
-
         run_evaluation(config)
+        print()
+
+
+def run_balance_pilot(args: argparse.Namespace) -> None:
+    csv_out = args.csv_out
+
+    if args.overwrite and os.path.exists(csv_out):
+        os.remove(csv_out)
+
+    print("Running PCG balance pilot.")
+    print("Engine: Griddly-backed GridBattleEnv")
+    print("Design: size x map_type x skill ladder")
+    print(f"Episodes per cell: {args.episodes}")
+    print(f"CSV output: {csv_out}")
+    print()
+    print(
+        "  size |    map_type | agent                         | "
+        "winrate | turns |  dmg | choke | reach "
+    )
+    print("-" * 96)
+
+    cells = [
+        (size, map_type, agent_name)
+        for size in MAP_SIZES
+        for map_type in MAP_TYPES
+        for agent_name in BALANCE_AGENT_PROFILES
+    ]
+
+    for size, map_type, agent_name in cells:
+        config = ExperimentConfig(
+            agent=agent_name,
+            episodes=args.episodes,
+            seed=args.seed,
+            size=size,
+            map_type=map_type,
+            items=args.items,
+            enemy_count=args.enemy_count,
+            wall_density=args.wall_density,
+            max_steps=args.max_steps,
+            csv_out=csv_out,
+            quiet=True,
+            swept_variable="balance_pilot",
+            swept_value=f"{size}:{map_type}:{agent_name}",
+        )
+
+        results = run_evaluation(config)
+        print_compact_result(config, results)
 
     print()
-    print(f"Done. Results written to {args.csv_out}")
+    print(f"Done. Results written to {csv_out}")
 
 
 def main() -> None:
@@ -488,8 +844,10 @@ def main() -> None:
         run_smoke(args)
     elif args.command == "eval":
         run_evaluation(config_from_args(args))
-    elif args.command == "sweep":
-        run_sweep(args)
+    elif args.command == "balance-pilot":
+        run_balance_pilot(args)
+    elif args.command == "replay":
+        run_replay(args)
     else:
         raise SystemExit(f"Unknown command: {args.command}")
 

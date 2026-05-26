@@ -22,15 +22,17 @@ from .combat import DEFAULT_COMBAT_RULES, ITEM_MAP_CHARS, TERRAIN_MAP_CHARS, pos
 
 
 
-MapSize = Literal["tiny", "small", "medium", "large", "giant"]
+MapSize = Literal["small", "medium", "large"]
 MapType = Literal["baseline", "random_walk", "arena"]
 
 MAP_SIZES: dict[MapSize, tuple[int, int]] = {
-    "tiny": (9, 7),
-    "small": (13, 11),
-    "medium": (17, 13),
-    "large": (19, 17),
-    "giant": (25, 21),
+    # Remapped for the final balancing experiments:
+    # old tiny   -> small
+    # old small  -> medium
+    # old medium -> large
+    "small": (9, 7),
+    "medium": (13, 11),
+    "large": (17, 13),
 }
 
 MAP_TYPES: tuple[MapType, ...] = ("baseline", "random_walk", "arena")
@@ -56,27 +58,21 @@ class ArenaPreset:
 
 
 BASELINE_PRESETS: dict[MapSize, GenerationPreset] = {
-    "tiny": GenerationPreset(enemy_count=1, obstacle_density=0.10),
-    "small": GenerationPreset(enemy_count=2, obstacle_density=0.18),
-    "medium": GenerationPreset(enemy_count=3, obstacle_density=0.20),
-    "large": GenerationPreset(enemy_count=5, obstacle_density=0.22),
-    "giant": GenerationPreset(enemy_count=7, obstacle_density=0.24),
+    "small": GenerationPreset(enemy_count=1, obstacle_density=0.10),
+    "medium": GenerationPreset(enemy_count=2, obstacle_density=0.18),
+    "large": GenerationPreset(enemy_count=3, obstacle_density=0.20),
 }
 
 RANDOM_WALK_PRESETS: dict[MapSize, RandomWalkPreset] = {
-    "tiny": RandomWalkPreset(enemy_count=1, floor_fraction=0.34, branch_chance=0.20),
-    "small": RandomWalkPreset(enemy_count=2, floor_fraction=0.36, branch_chance=0.18),
-    "medium": RandomWalkPreset(enemy_count=3, floor_fraction=0.38, branch_chance=0.16),
-    "large": RandomWalkPreset(enemy_count=5, floor_fraction=0.40, branch_chance=0.14),
-    "giant": RandomWalkPreset(enemy_count=8, floor_fraction=0.42, branch_chance=0.12),
+    "small": RandomWalkPreset(enemy_count=1, floor_fraction=0.34, branch_chance=0.20),
+    "medium": RandomWalkPreset(enemy_count=2, floor_fraction=0.36, branch_chance=0.18),
+    "large": RandomWalkPreset(enemy_count=3, floor_fraction=0.38, branch_chance=0.16),
 }
 
 ARENA_PRESETS: dict[MapSize, ArenaPreset] = {
-    "tiny": ArenaPreset(enemy_count=1, obstacle_density=0.1),
-    "small": ArenaPreset(enemy_count=2, obstacle_density=0.12),
-    "medium": ArenaPreset(enemy_count=4, obstacle_density=0.14),
-    "large": ArenaPreset(enemy_count=6, obstacle_density=0.14),
-    "giant": ArenaPreset(enemy_count=8, obstacle_density=0.14),
+    "small": ArenaPreset(enemy_count=1, obstacle_density=0.10),
+    "medium": ArenaPreset(enemy_count=2, obstacle_density=0.12),
+    "large": ArenaPreset(enemy_count=4, obstacle_density=0.14),
 }
 
 DEFAULT_LEVEL = textwrap.dedent(
