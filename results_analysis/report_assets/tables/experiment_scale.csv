@@ -1,0 +1,5 @@
+Experiment,Cells,Episodes/cell,Total episodes,Purpose
+PCG screening,648,20,"12,960",Broad search over generator profiles
+Medium enemy tuning,144,30,"4,320",Tune medium-map enemy profile
+OFAT sensitivity,68,30,"2,040",Local sensitivity around tuned baseline
+Final validation,36,50,"1,800",Validate selected final defaults

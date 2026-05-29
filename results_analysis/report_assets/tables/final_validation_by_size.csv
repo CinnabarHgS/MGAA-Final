@@ -1,0 +1,4 @@
+Size,Random,Heuristic,MCTS-small,MCTS-medium
+small,62.7%,100.0%,100.0%,100.0%
+medium,1.3%,37.3%,72.7%,78.7%
+large,1.3%,35.3%,74.7%,82.7%
