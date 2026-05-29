@@ -1,108 +1,344 @@
-# GridBattle Demo
+# GridBattle
 
-This repo contains a minimal tactical grid-battle prototype built around four layers:
+GridBattle is a turn-based tactical grid game for the Modern Game AI Algorithms final project. The project includes:
 
-1. a Griddly battle environment
-2. a procedural map generator
-3. several AI baselines plus MCTS evaluation
-4. a pygame presentation layer for mouse-driven play
+- a playable Pygame interface (`play.py`);
+- a Griddly-backed game environment;
+- procedural map generation;
+- agent-based experiments for evaluating difficulty and balance.
 
-## File Layout
+## Installation
 
-- `grid_battle/game.py`: Griddly env wrapper and turn encoding
-- `grid_battle/state.py`: snapshot/action dataclasses with no Griddly dependency
-- `grid_battle/combat.py`: combat rules plus range/damage helpers
-- `grid_battle/pcg.py`: procedural map generation, presets, and structural analysis
-- `grid_battle/agents.py`: `HeuristicAgent`, `RandomAgent`, and `heuristic_turn()`
-- `grid_battle/simulator.py`: pure-Python forward model used by MCTS
-- `grid_battle/mcts.py`: `MctsAgent` (UCT search)
-- `play_demo.py`: command-line playable demo
-- `play_pygame.py`: pygame window demo with mouse-driven turn planning
-- `evaluate_demo.py`: batch evaluation through Griddly
-- `evaluate_simulator.py`: batch evaluation through the pure-Python simulator
-- `inspect_pcg.py`: structural map inspection helper
-- `run_sweep.py`: OFAT sweep runner for experiment batches
-
-## Install
-
-Python 3.11.
-
-Windows (PowerShell):
-
-```powershell
-py -3.11 -m venv .venv
-py -3.11 -m pip install --target ".venv\Lib\site-packages" -r requirements.txt
-```
-
-macOS / Linux:
+Use Python 3.11.
 
 ```bash
 python3.11 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-```
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+````
 
-`griddly` only ships an x86_64 wheel on PyPI, so it does not install on arm64 macs. The simulator-based tooling still works there.
-
-## Play The Demo
-
-CLI:
+On Windows PowerShell:
 
 ```powershell
-& ".\.venv\Scripts\python.exe" .\play_demo.py
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Pygame UI:
+## Playing the game
 
-```powershell
-& ".\.venv\Scripts\python.exe" .\play_pygame.py
+Start the default playable game:
+
+```bash
+python play.py
 ```
 
-Window controls:
+Recommended first-time player command:
 
-- click the player to select it
-- click a blue tile to preview movement
-- click a red enemy to choose an attack
-- select an inventory item from the action panel to activate it this turn
-- `End Turn`: confirm the planned move, item use, and attacks
-- `Esc`: cancel the current preview or selection
-- `R`: reset the current map
-
-## Agents
-
-- `HeuristicAgent`: attacks immediately when possible, otherwise moves toward attackable tiles
-- `RandomAgent`: uniformly random legal-move baseline
-- `MctsAgent`: UCT search using the pure-Python simulator for rollouts
-
-All three control the player. Enemies always use the built-in chase logic from the environment.
-
-## Evaluation
-
-Both evaluation runners support preset PCG maps via `--size` and `--map-type`.
-
-Griddly evaluation:
-
-```powershell
-& ".\.venv\Scripts\python.exe" .\evaluate_demo.py --agent mcts --episodes 50 --size small --map-type baseline --seed 11 --mcts-iterations 200
+```bash
+python play.py --size small --map-type baseline --items normal --enemy-count default --wall-density default --seed 1
 ```
 
-Pure-Python evaluation:
+This starts a small baseline map with normal item placement and the default enemy/wall settings. It is the easiest way to learn the controls before trying harder generated maps.
 
-```powershell
-& ".\.venv\Scripts\python.exe" .\evaluate_simulator.py --agent mcts --episodes 50 --size small --map-type baseline --seed 11 --mcts-iterations 200
+Recommended next maps:
+
+```bash
+python play.py --size medium --map-type arena --items many --enemy-count medium_plus --wall-density low --seed 2
+python play.py --size large --map-type random_walk --items many --enemy-count default --wall-density low --seed 3
 ```
 
-The simulator does not reproduce every Griddly behavior exactly, but it is useful for agent ranking and sweep automation when Griddly is unavailable.
+### Controls
 
-## PCG Inspection
+* Left click: select the player, destination, target, item, or UI button.
+* Space: select the player.
+* Enter: commit the selected turn.
+* Escape: cancel the current selection.
+* R: restart the current map.
 
-```powershell
-& ".\.venv\Scripts\python.exe" .\inspect_pcg.py --count 3 --size small --map-type random_walk
+## `play.py` arguments
+
+```bash
+python play.py [options]
 ```
 
-## Sweeps
+| Argument          |                                        Values / type |    Default | Description                                                                          |
+| ----------------- | ---------------------------------------------------: | ---------: | ------------------------------------------------------------------------------------ |
+| `--default-map`   |                                                 flag |        off | Use the fixed default map instead of generating a map.                               |
+| `--seed`          |                                              integer |     random | Seed for generated maps. Use this to reproduce a map.                                |
+| `--size`          |                           `small`, `medium`, `large` |    `small` | Generated map size.                                                                  |
+| `--map-type`      |                   `baseline`, `random_walk`, `arena` | `baseline` | PCG generator type.                                                                  |
+| `--items`         | `few`, `normal`, `many`, `none`, `default`, `double` |  `default` | Item density preset.                                                                 |
+| `--enemy-count`   |              `low`, `default`, `medium_plus`, `high` |  `default` | Enemy count preset.                                                                  |
+| `--wall-density`  |                             `low`, `default`, `high` |  `default` | Wall density preset.                                                                 |
+| `--max-steps`     |                                              integer |      `120` | Maximum number of player turns.                                                      |
+| `--tile-size`     |                                              integer |       `68` | Pixel size of each tile in the Pygame UI.                                            |
+| `--auto-close-ms` |                                              integer |        `0` | Automatically close the window after this many milliseconds. Useful for smoke tests. |
 
-```powershell
-& ".\.venv\Scripts\python.exe" .\run_sweep.py --episodes 50
+Examples:
+
+```bash
+python play.py --default-map
+python play.py --size small --map-type baseline --seed 42
+python play.py --size medium --map-type arena --items many --enemy-count medium_plus --wall-density low --seed 42
+python play.py --size large --map-type random_walk --items many --enemy-count default --wall-density low --seed 42
 ```
 
-Outputs are written under `results_analysis/` and CSV experiment logs.
+## Running experiments
+
+Experiments are run with:
+
+```bash
+python experiment.py <command> [options]
+```
+
+Most experiment commands support:
+
+| Argument      | Description                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------------- |
+| `--episodes`  | Number of episodes per configuration.                                                                   |
+| `--seed`      | Base random seed.                                                                                       |
+| `--max-steps` | Maximum number of player turns per episode.                                                             |
+| `--csv-out`   | Output CSV path.                                                                                        |
+| `--overwrite` | Overwrite an existing CSV output file.                                                                  |
+| `--dry-run`   | Print planned configurations without running them. Available for screening, OFAT, and final validation. |
+| `--workers`   | Number of parallel worker processes.                                                                    |
+
+Valid agents are:
+
+```text
+random, heuristic, mcts_small, mcts_medium, mcts_strong, mcts_weak
+```
+
+`mcts_weak` is an alias for `mcts_small`.
+
+## Experiment commands
+
+### Smoke test
+
+Quick sanity check that the real environment runs:
+
+```bash
+python experiment.py smoke --episodes 2 --workers 4
+```
+
+Arguments:
+
+| Argument      | Default |
+| ------------- | ------: |
+| `--episodes`  |     `2` |
+| `--seed`      |    `11` |
+| `--max-steps` |    `60` |
+| `--workers`   |     `1` |
+
+### Single evaluation
+
+Run one configuration with one agent:
+
+```bash
+python experiment.py eval \
+  --agent heuristic \
+  --size medium \
+  --map-type random_walk \
+  --items normal \
+  --enemy-count default \
+  --wall-density default \
+  --episodes 20 \
+  --csv-out results/eval.csv \
+  --workers 4
+```
+
+Arguments:
+
+| Argument         | Values / default                                                       |
+| ---------------- | ---------------------------------------------------------------------- |
+| `--agent`        | default `heuristic`; one of the valid agents listed above              |
+| `--episodes`     | default `20`                                                           |
+| `--seed`         | default `11`                                                           |
+| `--size`         | default `medium`; `small`, `medium`, `large`                           |
+| `--map-type`     | default `random_walk`; `baseline`, `random_walk`, `arena`              |
+| `--items`        | default `normal`; `few`, `normal`, `many`, `none`, `default`, `double` |
+| `--enemy-count`  | default `default`; `low`, `default`, `medium_plus`, `high`             |
+| `--wall-density` | default `default`; `low`, `default`, `high`                            |
+| `--max-steps`    | default `120`                                                          |
+| `--csv-out`      | default none                                                           |
+| `--quiet`        | suppress per-episode output                                            |
+| `--workers`      | default `1`                                                            |
+
+### Balance pilot
+
+Quick sweep over size, map type, and validation agents:
+
+```bash
+python experiment.py balance-pilot \
+  --episodes 10 \
+  --items normal \
+  --enemy-count default \
+  --wall-density default \
+  --csv-out results/balance_pilot.csv \
+  --overwrite \
+  --workers 4
+```
+
+### PCG screening
+
+Reduced factorial screen over PCG profiles:
+
+```bash
+python experiment.py pcg-screen \
+  --episodes 20 \
+  --sizes small,medium,large \
+  --map-types baseline,random_walk,arena \
+  --enemy-profiles light,normal,heavy \
+  --item-profiles few,normal,many \
+  --wall-profiles open,normal \
+  --agents random,heuristic,mcts_small,mcts_medium \
+  --csv-out results/pcg_screening.csv \
+  --overwrite \
+  --workers 8
+```
+
+Profile values:
+
+```text
+enemy-profiles: light, normal, medium_plus, heavy
+item-profiles:  few, normal, many
+wall-profiles:  open, normal, tight
+```
+
+Preview the full set of cells without running:
+
+```bash
+python experiment.py pcg-screen --dry-run
+```
+
+### Medium enemy tuning
+
+This is a targeted screen for medium maps:
+
+```bash
+python experiment.py pcg-screen \
+  --episodes 30 \
+  --sizes medium \
+  --map-types baseline,random_walk,arena \
+  --enemy-profiles normal,medium_plus,heavy \
+  --item-profiles normal,many \
+  --wall-profiles open,normal \
+  --agents random,heuristic,mcts_small,mcts_medium \
+  --csv-out results/medium_enemy_tuning.csv \
+  --overwrite \
+  --workers 8
+```
+
+### OFAT sensitivity
+
+One-factor-at-a-time sensitivity around a tuned baseline:
+
+```bash
+python experiment.py ofat \
+  --episodes 30 \
+  --csv-out results/ofat_real.csv \
+  --overwrite \
+  --workers 8
+```
+
+Important arguments:
+
+| Argument                   | Default                                                                    |
+| -------------------------- | -------------------------------------------------------------------------- |
+| `--factors`                | `size,map_type,enemy_profile,item_profile,wall_profile,player_hp,enemy_hp` |
+| `--agents`                 | `random,heuristic,mcts_small,mcts_medium`                                  |
+| `--baseline-size`          | tuned baseline size                                                        |
+| `--baseline-map-type`      | tuned baseline map type                                                    |
+| `--baseline-enemy-profile` | tuned baseline enemy profile                                               |
+| `--baseline-item-profile`  | tuned baseline item profile                                                |
+| `--baseline-wall-profile`  | tuned baseline wall profile                                                |
+| `--baseline-player-hp`     | tuned baseline player HP                                                   |
+| `--baseline-enemy-hp`      | tuned baseline enemy HP                                                    |
+| `--player-hp-levels`       | comma-separated positive integers                                          |
+| `--enemy-hp-levels`        | comma-separated positive integers                                          |
+
+Example with only HP factors:
+
+```bash
+python experiment.py ofat \
+  --factors player_hp,enemy_hp \
+  --player-hp-levels 3,4,5,6 \
+  --enemy-hp-levels 1,2,3 \
+  --episodes 30 \
+  --workers 8
+```
+
+### Final validation
+
+Run the final selected generator defaults:
+
+```bash
+python experiment.py final-validation \
+  --episodes 50 \
+  --csv-out results/final_validation.csv \
+  --overwrite \
+  --workers 8
+```
+
+Optional arguments:
+
+| Argument      | Default                                   |
+| ------------- | ----------------------------------------- |
+| `--agents`    | `random,heuristic,mcts_small,mcts_medium` |
+| `--episodes`  | `50`                                      |
+| `--seed`      | `11`                                      |
+| `--max-steps` | `120`                                     |
+| `--csv-out`   | `results/final_validation.csv`            |
+| `--dry-run`   | off                                       |
+| `--workers`   | `1`                                       |
+
+### Replay
+
+Replay one generated episode as text or in the Pygame UI:
+
+```bash
+python experiment.py replay \
+  --agent mcts_medium \
+  --size large \
+  --map-type arena \
+  --items many \
+  --enemy-count default \
+  --wall-density low \
+  --seed 11 \
+  --episode 0
+```
+
+Save a replay log:
+
+```bash
+python experiment.py replay \
+  --agent mcts_medium \
+  --size large \
+  --map-type arena \
+  --episode 0 \
+  --log-out results/replay.txt
+```
+
+Replay with UI:
+
+```bash
+python experiment.py replay \
+  --agent mcts_medium \
+  --size large \
+  --map-type arena \
+  --episode 0 \
+  --ui \
+  --pause
+```
+
+Replay-specific arguments:
+
+| Argument      | Description                                           |
+| ------------- | ----------------------------------------------------- |
+| `--agent`     | Agent to replay.                                      |
+| `--episode`   | Episode index to replay.                              |
+| `--pause`     | Start paused.                                         |
+| `--log-out`   | Write replay text to a file.                          |
+| `--ui`        | Show the replay in the Pygame UI.                     |
+| `--delay-ms`  | Delay between replay steps in UI mode. Default `600`. |
+| `--tile-size` | Tile size in UI mode. Default `68`.                   |

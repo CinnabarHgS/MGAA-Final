@@ -22,15 +22,17 @@ from .combat import DEFAULT_COMBAT_RULES, ITEM_MAP_CHARS, TERRAIN_MAP_CHARS, pos
 
 
 
-MapSize = Literal["tiny", "small", "medium", "large", "giant"]
+MapSize = Literal["small", "medium", "large"]
 MapType = Literal["baseline", "random_walk", "arena"]
 
 MAP_SIZES: dict[MapSize, tuple[int, int]] = {
-    "tiny": (9, 7),
-    "small": (13, 11),
-    "medium": (17, 13),
-    "large": (19, 17),
-    "giant": (25, 21),
+    # Remapped for the final balancing experiments:
+    # old tiny   -> small
+    # old small  -> medium
+    # old medium -> large
+    "small": (9, 7),
+    "medium": (13, 11),
+    "large": (17, 13),
 }
 
 MAP_TYPES: tuple[MapType, ...] = ("baseline", "random_walk", "arena")
@@ -56,27 +58,21 @@ class ArenaPreset:
 
 
 BASELINE_PRESETS: dict[MapSize, GenerationPreset] = {
-    "tiny": GenerationPreset(enemy_count=1, obstacle_density=0.10),
-    "small": GenerationPreset(enemy_count=2, obstacle_density=0.18),
-    "medium": GenerationPreset(enemy_count=3, obstacle_density=0.20),
-    "large": GenerationPreset(enemy_count=5, obstacle_density=0.22),
-    "giant": GenerationPreset(enemy_count=7, obstacle_density=0.24),
+    "small": GenerationPreset(enemy_count=1, obstacle_density=0.10),
+    "medium": GenerationPreset(enemy_count=2, obstacle_density=0.18),
+    "large": GenerationPreset(enemy_count=3, obstacle_density=0.20),
 }
 
 RANDOM_WALK_PRESETS: dict[MapSize, RandomWalkPreset] = {
-    "tiny": RandomWalkPreset(enemy_count=1, floor_fraction=0.34, branch_chance=0.20),
-    "small": RandomWalkPreset(enemy_count=2, floor_fraction=0.36, branch_chance=0.18),
-    "medium": RandomWalkPreset(enemy_count=3, floor_fraction=0.38, branch_chance=0.16),
-    "large": RandomWalkPreset(enemy_count=5, floor_fraction=0.40, branch_chance=0.14),
-    "giant": RandomWalkPreset(enemy_count=8, floor_fraction=0.42, branch_chance=0.12),
+    "small": RandomWalkPreset(enemy_count=1, floor_fraction=0.34, branch_chance=0.20),
+    "medium": RandomWalkPreset(enemy_count=2, floor_fraction=0.36, branch_chance=0.18),
+    "large": RandomWalkPreset(enemy_count=3, floor_fraction=0.38, branch_chance=0.16),
 }
 
 ARENA_PRESETS: dict[MapSize, ArenaPreset] = {
-    "tiny": ArenaPreset(enemy_count=1, obstacle_density=0.1),
-    "small": ArenaPreset(enemy_count=2, obstacle_density=0.12),
-    "medium": ArenaPreset(enemy_count=4, obstacle_density=0.14),
-    "large": ArenaPreset(enemy_count=6, obstacle_density=0.14),
-    "giant": ArenaPreset(enemy_count=8, obstacle_density=0.14),
+    "small": ArenaPreset(enemy_count=1, obstacle_density=0.10),
+    "medium": ArenaPreset(enemy_count=2, obstacle_density=0.12),
+    "large": ArenaPreset(enemy_count=4, obstacle_density=0.14),
 }
 
 DEFAULT_LEVEL = textwrap.dedent(
@@ -286,19 +282,76 @@ def _finalize_generated_candidate(
 
 
 
-ITEM_LEVELS = ("none", "default", "double")
+ITEM_LEVELS = ("few", "normal", "many", "none", "default", "double")
 
 
-def _pools_for_item_level(item_level: str) -> tuple[list[str], list[str], bool]:
-    """Return (terrain_pool, item_pool, allow_golden_gun) for a given level name."""
+def _pools_for_item_level(
+    item_level: str,
+    free_count: int | None = None,
+) -> tuple[list[str], list[str], bool]:
+    """Return (terrain_pool, item_pool, allow_golden_gun) for a given level.
+
+    The main experiment levels are:
+
+    - few:    sparse terrain/items, but still includes items
+    - normal: regular amount of terrain/items
+    - many:   resource-rich maps
+
+    Counts scale with the number of free cells, so larger maps receive more
+    terrain and items in absolute terms.
+
+    Backwards-compatible aliases:
+    - default -> normal
+    - double  -> many
+    - none    -> no terrain/items
+    """
+
+    aliases = {
+        "default": "normal",
+        "double": "many",
+    }
+
+    item_level = aliases.get(item_level, item_level)
+
     if item_level == "none":
         return [], [], False
-    if item_level == "default":
-        return list("HHBBK"), ["D", "V", "S"], True
-    if item_level == "double":
-        return list("HHHHBBBBKK"), ["D", "D", "V", "V", "S", "S"], True
-    raise ValueError(f"Unknown item_level: {item_level!r}. Choose from {ITEM_LEVELS}.")
 
+    if item_level not in {"few", "normal", "many"}:
+        raise ValueError(f"Unknown item_level: {item_level!r}. Choose from {ITEM_LEVELS}.")
+
+    free_count = max(0, free_count or 0)
+
+    if item_level == "few":
+        terrain_fraction = 0.06
+        item_fraction = 0.025
+    elif item_level == "normal":
+        terrain_fraction = 0.10
+        item_fraction = 0.04
+    else:  # many
+        terrain_fraction = 0.16
+        item_fraction = 0.06
+
+    terrain_count = round(free_count * terrain_fraction)
+    item_count = round(free_count * item_fraction)
+
+    if free_count > 0:
+        terrain_count = max(2, terrain_count)
+        item_count = max(1, item_count)
+
+    # Avoid overfilling very small or very dense maps.
+    terrain_count = min(terrain_count, max(0, free_count // 2))
+    item_count = min(item_count, max(0, free_count - terrain_count))
+
+    def cycle_pool(symbols: str, count: int) -> list[str]:
+        return [symbols[i % len(symbols)] for i in range(count)]
+
+    # Terrain is weighted toward hills/bushes, with fewer bunkers.
+    terrain_pool = cycle_pool("HHBBK", terrain_count)
+
+    # Items are cycled so all core item types remain represented over time.
+    item_pool = cycle_pool("DVS", item_count)
+
+    return terrain_pool, item_pool, True
 
 def _place_terrain_and_items(
     grid: list[list[str]],
@@ -316,7 +369,7 @@ def _place_terrain_and_items(
     ]
     rng.shuffle(free)
 
-    terrain_pool, item_pool, allow_golden_gun = _pools_for_item_level(item_level)
+    terrain_pool, item_pool, allow_golden_gun = _pools_for_item_level(item_level, free_count=len(free))
 
     for i, (tx, ty) in enumerate(free[: len(terrain_pool)]):
         grid[ty][tx] = terrain_pool[i]
@@ -1184,8 +1237,8 @@ def generate_arena_level(
 WALL_DENSITY_LEVELS = ("low", "default", "high")
 _WALL_DENSITY_MULTIPLIER = {"low": 0.5, "default": 1.0, "high": 1.5}
 
-ENEMY_COUNT_LEVELS = ("low", "default", "high")
-_ENEMY_COUNT_DELTA = {"low": -1, "default": 0, "high": +2}
+ENEMY_COUNT_LEVELS = ("low", "default", "medium_plus", "high")
+_ENEMY_COUNT_DELTA = {"low": -1, "default": 0, "medium_plus": +1, "high": +2}
 
 
 def _resolve_enemy_count(preset_count: int, enemy_count: "int | str | None") -> int:

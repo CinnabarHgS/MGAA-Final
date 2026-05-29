@@ -545,8 +545,13 @@ class GridBattleWindow:
         env: GridBattleEnv,
         max_steps: int,
         window_title: str = "GridBattle UI Demo",
-        tile_size: int = 68,
-        auto_close_ms: int = 0,
+        tile_size: int = 68,        auto_close_ms: int = 0,
+        agent: object | None = None,
+        agent_name: str | None = None,
+        agent_delay_ms: int = 600,
+        agent_start_paused: bool = True,
+        agent_factory: object | None = None,
+        replay_seed: int | None = None,
     ):
         pygame.init()
         pygame.font.init()
@@ -556,6 +561,14 @@ class GridBattleWindow:
         self.max_steps = max_steps
         self.tile_size = max(48, tile_size)
         self.auto_close_ms = max(0, auto_close_ms)
+        self.agent = agent
+        self.agent_name = agent_name or (agent.__class__.__name__ if agent is not None else "")
+        self.agent_delay_ms = max(1, agent_delay_ms)
+        self.agent_replay_paused = agent_start_paused
+        self.agent_factory = agent_factory
+        self.replay_seed = replay_seed
+        self.agent_last_step_at = pygame.time.get_ticks()
+        self.agent_last_action_summary = "No agent action taken yet."
         self.margin = 24
         self.sidebar_width = 350
         self.clock = pygame.time.Clock()
@@ -577,6 +590,14 @@ class GridBattleWindow:
         self.turn_feedback: TurnFeedback | None = None
         self.status_message = "Click the player to start planning a turn."
         self.last_turn_summary = "No turn taken yet."
+
+        if self.agent is not None:
+            state = "paused" if self.agent_replay_paused else "running"
+            self.status_message = (
+                f"Agent replay ({self.agent_name}) is {state}. "
+                "Space pauses/resumes, Enter steps, R resets."
+            )
+            self.last_turn_summary = "Agent replay ready."
         self.grid_line_color = PALETTE["grid_line"]
 
         board_width = self.snapshot.width * self.tile_size
@@ -597,14 +618,171 @@ class GridBattleWindow:
                 if event.type == pygame.QUIT:
                     self.running = False
                 elif event.type == pygame.KEYDOWN:
-                    self._handle_keydown(event.key)
+                    if self.agent is not None:
+                        self._handle_agent_replay_keydown(event.key)
+                    else:
+                        self._handle_keydown(event.key)
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    self._handle_left_click(event.pos)
+                    if self.agent is None:
+                        self._handle_left_click(event.pos)
 
+            self._maybe_step_agent_replay()
             self._draw()
             self.clock.tick(60)
 
         pygame.quit()
+
+
+    def _handle_agent_replay_keydown(self, key: int) -> None:
+        if key in (pygame.K_ESCAPE, pygame.K_q):
+            self.running = False
+            return
+
+        if key == pygame.K_SPACE:
+            self.agent_replay_paused = not self.agent_replay_paused
+            state = "paused" if self.agent_replay_paused else "running"
+            self.status_message = (
+                f"Agent replay ({self.agent_name}) is {state}. "
+                "Space pauses/resumes, Enter steps, R resets."
+            )
+            return
+
+        if key in (pygame.K_RETURN, pygame.K_RIGHT):
+            self._agent_replay_step(force=True)
+            return
+
+        if key == pygame.K_r:
+            self._reset_agent_replay()
+            return
+
+    def _reset_agent_replay(self) -> None:
+        if self.replay_seed is not None:
+            import random as _random
+            _random.seed(self.replay_seed)
+
+        if self.agent_factory is not None:
+            self.agent = self.agent_factory()
+
+        self._reset()
+        self.agent_last_step_at = pygame.time.get_ticks()
+        self.agent_last_action_summary = "Replay reset."
+
+        state = "paused" if self.agent_replay_paused else "running"
+        self.status_message = (
+            f"Agent replay reset with seed {self.replay_seed}. "
+            f"Replay is {state}."
+        )
+
+    def _maybe_step_agent_replay(self) -> None:
+        if self.agent is None:
+            return
+
+        if self.agent_replay_paused:
+            return
+
+        if self._is_game_over():
+            return
+
+        if self._feedback_active():
+            return
+
+        now = pygame.time.get_ticks()
+
+        if now - self.agent_last_step_at < self.agent_delay_ms:
+            return
+
+        self._agent_replay_step(force=False)
+
+    def _agent_replay_step(self, *, force: bool) -> None:
+        if self.agent is None:
+            return
+
+        if self.snapshot.player is None or self._is_game_over():
+            self.status_message = "Agent replay finished. Press R to reset or Esc to quit."
+            return
+
+        if self._feedback_active():
+            return
+
+        previous_snapshot = self.snapshot
+        turn_action = self.agent.act(previous_snapshot)
+
+        move_directions = tuple(turn_action.move_directions)
+
+        if not move_directions and turn_action.move_direction is not None:
+            move_directions = (turn_action.move_direction,)
+
+        snapshot, reward, done, info = self.env.step(turn_action)
+        del reward, done
+
+        self.turn_feedback = self._build_turn_feedback(
+            previous_snapshot,
+            snapshot,
+            move_directions=move_directions,
+            primary_attack=None,
+            secondary_attack=None,
+            activated_item=turn_action.activate_item,
+        )
+
+        self.snapshot = snapshot
+        self.selected_player = False
+        self.planned_move_directions = ()
+        self.selected_item = None
+        self.vehicle_auto_selected = False
+        self.primary_attack = None
+        self.secondary_attack = None
+
+        self.agent_last_action_summary = self._describe_agent_turn(turn_action)
+        self.last_turn_summary = self._describe_turn(
+            previous_snapshot,
+            snapshot,
+            info.get("History", []),
+            turn_action.activate_item,
+        )
+
+        self.agent_last_step_at = pygame.time.get_ticks()
+
+        if snapshot.player is None:
+            self.status_message = f"Agent replay ({self.agent_name}) ended: player defeated."
+        elif snapshot.remaining_enemies == 0:
+            self.status_message = f"Agent replay ({self.agent_name}) ended: all enemies defeated."
+        elif snapshot.player_turns >= self.max_steps:
+            self.status_message = f"Agent replay ({self.agent_name}) ended: turn limit reached."
+        else:
+            state = "paused" if self.agent_replay_paused else "running"
+            self.status_message = (
+                f"Agent replay ({self.agent_name}) is {state}. "
+                f"Last action: {self.agent_last_action_summary}"
+            )
+
+    def _describe_agent_turn(self, turn: TurnAction) -> str:
+        parts: list[str] = []
+
+        if turn.activate_item is not None:
+            parts.append(f"activate {self._pretty_item_name(turn.activate_item)}")
+
+        directions = tuple(turn.move_directions)
+
+        if not directions and turn.move_direction is not None:
+            directions = (turn.move_direction,)
+
+        if directions:
+            parts.append(
+                "move "
+                + " then ".join(DIRECTION_NAMES.get(direction, str(direction)) for direction in directions)
+            )
+        else:
+            parts.append("stay")
+
+        if turn.action is not None:
+            direction = DIRECTION_NAMES.get(turn.action.direction, str(turn.action.direction))
+            parts.append(f"{turn.action.action_type} {direction}")
+
+        if turn.action2 is not None:
+            direction = DIRECTION_NAMES.get(turn.action2.direction, str(turn.action2.direction))
+            parts.append(f"second {turn.action2.action_type} {direction}")
+
+        return "; ".join(parts)
 
     def _handle_keydown(self, key: int) -> None:
         if self._feedback_active() and key != pygame.K_r:

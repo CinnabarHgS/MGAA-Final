@@ -1,0 +1,8 @@
+Factor,Random,Heuristic,MCTS-small,MCTS-medium
+Enemy HP,53.3%,96.7%,83.3%,70.0%
+Enemy profile,66.7%,86.7%,50.0%,33.3%
+Player HP,10.0%,83.3%,50.0%,43.3%
+Map size,66.7%,53.3%,33.3%,26.7%
+Item profile,3.3%,20.0%,23.3%,30.0%
+Wall profile,3.3%,16.7%,3.3%,20.0%
+Map type,0.0%,6.7%,13.3%,20.0%

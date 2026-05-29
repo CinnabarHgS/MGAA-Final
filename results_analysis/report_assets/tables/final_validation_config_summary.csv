@@ -1,0 +1,10 @@
+Size,Map,Enemy,Items,Walls,Random,Heuristic,MCTS-S,MCTS-M,Gap,Label
+small,baseline,normal,normal,normal,66%,100%,100%,100%,0%,too easy
+small,random_walk,normal,normal,normal,58%,100%,100%,100%,0%,too easy
+small,arena,normal,normal,normal,64%,100%,100%,100%,0%,too easy
+medium,baseline,medium_plus,many,open,2%,36%,76%,80%,44%,balanced
+medium,random_walk,medium_plus,many,open,2%,36%,64%,68%,32%,balanced
+medium,arena,medium_plus,many,open,0%,40%,78%,88%,48%,balanced
+large,baseline,normal,many,normal,4%,42%,76%,86%,44%,balanced
+large,random_walk,normal,many,open,0%,42%,82%,76%,34%,balanced
+large,arena,normal,many,open,0%,22%,66%,86%,64%,expert-leaning
