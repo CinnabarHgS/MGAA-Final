@@ -16,6 +16,52 @@ python experiment.py ...
 
 ---
 
+## After unzipping `code.zip`
+
+The zip is intended to be self-contained for running the game, reproducing the
+experiments, and regenerating the analysis summaries/figures.
+
+```bash
+unzip code.zip
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Run these commands from the directory containing `README.md`,
+`requirements.txt`, `play.py`, and `experiment.py`.
+
+The existing result CSV files are included under `results/`, so the report
+analysis can be regenerated without rerunning all experiments. To check that the
+environment works, run:
+
+```bash
+python experiment.py smoke --workers 4
+```
+
+To regenerate the final validation analysis from the included CSV:
+
+```bash
+python results_analysis/analyze_pcg_results.py \
+  results/final_validation.csv \
+  --out-dir results_analysis/final_validation
+```
+
+To recompute the final validation itself:
+
+```bash
+python experiment.py final-validation \
+  --episodes 50 \
+  --workers 16 \
+  --overwrite \
+  --csv-out results/final_validation.csv
+```
+
+To reproduce all main experiment CSVs from scratch, run the commands in the
+Experiments section below.
+
+---
+
 ## Installation
 
 Use Python 3.11.
@@ -408,4 +454,63 @@ python play.py
 python experiment.py smoke --workers 4
 python experiment.py final-validation --episodes 50 --workers 16 --overwrite
 python results_analysis/analyze_pcg_results.py results/final_validation.csv --out-dir results_analysis/final_validation
+```
+
+## Full reproduction workflow
+
+The following commands recreate the main CSV files used in the report. The
+runtime depends on hardware and worker count; reduce `--workers` if needed.
+
+```bash
+python experiment.py pcg-screen \
+  --episodes 20 \
+  --workers 16 \
+  --overwrite \
+  --csv-out results/pcg_screening.csv
+
+python experiment.py pcg-screen \
+  --episodes 30 \
+  --workers 16 \
+  --sizes medium \
+  --map-types baseline,random_walk,arena \
+  --enemy-profiles normal,medium_plus,heavy \
+  --item-profiles normal,many \
+  --wall-profiles open,normal \
+  --agents random,heuristic,mcts_small,mcts_medium \
+  --overwrite \
+  --csv-out results/medium_enemy_tuning.csv
+
+python experiment.py ofat \
+  --episodes 30 \
+  --workers 16 \
+  --overwrite \
+  --csv-out results/ofat_real.csv
+
+python experiment.py final-validation \
+  --episodes 50 \
+  --workers 16 \
+  --overwrite \
+  --csv-out results/final_validation.csv
+```
+
+After regenerating the CSVs, recreate the analysis summaries and figures:
+
+```bash
+python results_analysis/analyze_pcg_results.py \
+  results/pcg_screening.csv \
+  --out-dir results_analysis/pcg_screening
+
+python results_analysis/analyze_pcg_results.py \
+  results/medium_enemy_tuning.csv \
+  --out-dir results_analysis/medium_enemy_tuning
+
+python results_analysis/analyze_ofat_results.py \
+  results/ofat_real.csv \
+  --out-dir results_analysis/ofat_real
+
+python results_analysis/analyze_pcg_results.py \
+  results/final_validation.csv \
+  --out-dir results_analysis/final_validation
+
+python results_analysis/make_report_assets.py
 ```
